@@ -109,7 +109,7 @@ aad   = the 18 header bytes
 
 ## Frames
 
-A FRAME payload is a 13 byte frame header followed by the picture.
+A FRAME payload is a 14 byte frame header followed by the picture.
 
 ```text
 offset size field

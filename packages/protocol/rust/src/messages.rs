@@ -318,7 +318,8 @@ pub struct FrameHeader {
 }
 
 impl FrameHeader {
-    pub const LEN: usize = 13;
+    /// pts (8) + keyframe (1) + width (2) + height (2) + codec (1).
+    pub const LEN: usize = 14;
 
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
@@ -553,6 +554,20 @@ mod tests {
             acked_bytes: 4096,
         };
         assert_eq!(FrameAck::decode(&ack.encode()).unwrap(), ack);
+    }
+
+    #[test]
+    fn frame_header_round_trip() {
+        let header = FrameHeader {
+            pts_ms: 1234,
+            keyframe: true,
+            width: 1408,
+            height: 792,
+            codec: 2,
+        };
+        let encoded = header.encode();
+        assert_eq!(encoded.len(), FrameHeader::LEN);
+        assert_eq!(FrameHeader::decode(&encoded).unwrap(), header);
     }
 
     #[test]

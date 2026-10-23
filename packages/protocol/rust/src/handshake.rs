@@ -98,7 +98,7 @@ where
     }
     let auth = Auth::decode(&payload)?;
     let expected = crypto::proof(
-        psk,
+        &psk,
         CLIENT_PROOF_LABEL,
         &client_transcript(&hello.client_nonce, &server_nonce, &hello.device_id),
     );
@@ -108,10 +108,10 @@ where
         });
     }
 
-    let keys = crypto::derive_session_keys(psk, &hello.client_nonce, &server_nonce);
+    let keys = crypto::derive_session_keys(&psk, &hello.client_nonce, &server_nonce);
     let auth_ok = AuthOk {
         server_proof: crypto::proof(
-            psk,
+            &psk,
             SERVER_PROOF_LABEL,
             &server_transcript(&hello.client_nonce, &server_nonce),
         ),

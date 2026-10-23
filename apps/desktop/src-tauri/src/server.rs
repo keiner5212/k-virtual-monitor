@@ -68,10 +68,16 @@ impl Server {
         &self.store
     }
 
-    /// Binds the listener and serves until the process ends.
-    pub async fn run(self: Arc<Self>) -> std::io::Result<()> {
+    /// Binds the listener. The port may be zero, in which case the system
+    /// picks one and the caller can read it from the listener.
+    pub async fn bind(&self) -> std::io::Result<TcpListener> {
         let listener = TcpListener::bind((self.config.bind.as_str(), self.config.port)).await?;
         tracing::info!(port = self.config.port, "server listening");
+        Ok(listener)
+    }
+
+    /// Serves on an existing listener until the process ends.
+    pub async fn serve(self: Arc<Self>, listener: TcpListener) -> std::io::Result<()> {
         loop {
             let (stream, peer) = listener.accept().await?;
             if self.pending.load(Ordering::Relaxed) >= PENDING_LIMIT {
@@ -86,6 +92,12 @@ impl Server {
         }
     }
 
+    /// Binds the listener and serves until the process ends.
+    pub async fn run(self: Arc<Self>) -> std::io::Result<()> {
+        let listener = self.bind().await?;
+        self.serve(listener).await
+    }
+
     async fn handle(self: Arc<Self>, mut stream: TcpStream, peer: SocketAddr) {
         if let Err(error) = stream.set_nodelay(true) {
             tracing::warn!(%peer, %error, "cannot disable Nagle");
@@ -93,7 +105,9 @@ impl Server {
         self.pending.fetch_add(1, Ordering::Relaxed);
         let handshake = tokio::time::timeout(
             Duration::from_secs(self.config.handshake_timeout_secs),
-            server_handshake_with(&mut stream, &self.config.server_name, |hello| self.psk_for(hello)),
+            server_handshake_with(&mut stream, &self.config.server_name, |hello| {
+                self.psk_for(hello)
+            }),
         )
         .await;
         self.pending.fetch_sub(1, Ordering::Relaxed);
@@ -121,13 +135,18 @@ impl Server {
             store.upsert(entry.clone());
             entry
         };
-        if let Err(error) = self.store.lock().expect("device store is not poisoned").save(&self.store_path) {
+        if let Err(error) = self
+            .store
+            .lock()
+            .expect("device store is not poisoned")
+            .save(&self.store_path)
+        {
             tracing::error!(%error, "cannot save the device store");
         }
 
         tracing::info!(%peer, device = %entry.name, "session started");
         self.sessions.fetch_add(1, Ordering::Relaxed);
-        let result = self.run_session(stream, keys, &entry.caps).await;
+        let result = self.run_session(stream, keys, entry.caps).await;
         self.sessions.fetch_sub(1, Ordering::Relaxed);
         tracing::info!(%peer, ?result, "session ended");
     }
@@ -140,7 +159,7 @@ impl Server {
     }
 
     async fn run_session(
-        self: Arc<Self>,
+        &self,
         mut stream: TcpStream,
         keys: kvm_protocol::crypto::SessionKeys,
         granted_caps: u8,
@@ -198,17 +217,27 @@ impl Server {
 
             match event {
                 Event::Message(Ok((header, payload))) => {
-                    if !self.handle_client_message(header, &payload, &mut window, &mut session, &mut stream, granted_caps).await? {
+                    if !self
+                        .handle_client_message(
+                            header,
+                            &payload,
+                            &mut window,
+                            &mut session,
+                            &mut stream,
+                            granted_caps,
+                        )
+                        .await?
+                    {
                         return Ok(());
                     }
                 }
                 Event::Message(Err(error)) => return Err(error.to_string()),
                 Event::Frame(Some(frame)) => {
-                    self.send_frame(frame, &mut window, &mut session, &mut stream).await?;
+                    self.send_frame(frame, &mut window, &mut session, &mut stream)
+                        .await?;
                 }
                 Event::Frame(None) => return Ok(()),
             }
-
         }
     }
 
@@ -239,9 +268,16 @@ impl Server {
             }
             MessageType::InputMouse | MessageType::InputKey | MessageType::InputTouch => {
                 if granted_caps & caps::CONTROL == 0 {
-                    tracing::warn!(kind = header.kind.name(), "input from a device without control rights");
+                    tracing::warn!(
+                        kind = header.kind.name(),
+                        "input from a device without control rights"
+                    );
                 } else {
-                    tracing::debug!(kind = header.kind.name(), bytes = payload.len(), "input received");
+                    tracing::debug!(
+                        kind = header.kind.name(),
+                        bytes = payload.len(),
+                        "input received"
+                    );
                 }
             }
             MessageType::Close => return Ok(false),

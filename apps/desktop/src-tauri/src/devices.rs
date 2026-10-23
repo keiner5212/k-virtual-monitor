@@ -40,7 +40,7 @@ fn default_caps() -> u8 {
     CAP_VIEW | CAP_CONTROL
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeviceStore {
     #[serde(default)]
     pub devices: Vec<DeviceEntry>,
@@ -132,8 +132,9 @@ mod tests {
     fn a_store_round_trips_through_a_file() {
         let dir = std::env::temp_dir().join(format!("kvm-test-{}", std::process::id()));
         let path = dir.join("devices.json");
-        let mut store = DeviceStore::default();
-        store.upsert(entry("aa"));
+        let store = DeviceStore {
+            devices: vec![entry("aa")],
+        };
         store.save(&path).unwrap();
 
         let loaded = DeviceStore::load(&path).unwrap();
@@ -144,8 +145,9 @@ mod tests {
 
     #[test]
     fn an_upsert_replaces_the_entry() {
-        let mut store = DeviceStore::default();
-        store.upsert(entry("aa"));
+        let mut store = DeviceStore {
+            devices: vec![entry("aa")],
+        };
         let mut updated = entry("aa");
         updated.paired = true;
         store.upsert(updated);

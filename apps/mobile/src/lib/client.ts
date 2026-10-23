@@ -28,7 +28,7 @@ import { LatestFrame, type Frame } from "./frames";
 const MAX_PAYLOAD = 4 * 1024 * 1024;
 
 /** Bytes of the frame header that precede the picture. */
-const FRAME_HEADER_LEN = 13;
+const FRAME_HEADER_LEN = 14;
 
 export type ConnectionState = "idle" | "connecting" | "connected" | "error" | "closed";
 

@@ -140,8 +140,10 @@ mod tests {
 
     #[test]
     fn a_zero_fps_is_rejected() {
-        let mut config = ServerConfig::default();
-        config.fps = 0;
+        let config = ServerConfig {
+            fps: 0,
+            ..ServerConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 }

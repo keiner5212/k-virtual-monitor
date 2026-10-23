@@ -13,8 +13,8 @@ use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use kvm_protocol::crypto::Psk;
 use kvm_protocol::pairing::{format_safety_code, PairingBlob};
-use kvm_protocol::Psk;
 use rand::RngCore;
 use tauri::State;
 
@@ -56,7 +56,11 @@ fn server_status(state: State<'_, AppState>) -> ServerStatus {
         port: state.config.port,
         address: local_address(),
         sessions: state.server.sessions(),
-        paired_devices: state.store.lock().expect("store is not poisoned").paired_count(),
+        paired_devices: state
+            .store
+            .lock()
+            .expect("store is not poisoned")
+            .paired_count(),
     }
 }
 
@@ -78,7 +82,9 @@ fn create_pairing(state: State<'_, AppState>) -> Result<PairingInfo, String> {
     {
         let mut store = state.store.lock().expect("store is not poisoned");
         store.upsert(entry);
-        store.save(&state.store_path).map_err(|error| error.to_string())?;
+        store
+            .save(&state.store_path)
+            .map_err(|error| error.to_string())?;
     }
 
     let blob = PairingBlob::new(
@@ -185,9 +191,7 @@ pub fn run_headless() -> Result<(), String> {
     let server = Arc::new(Server::new(config, store, store_path, source));
 
     let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
-    runtime.block_on(async move {
-        server.run().await.map_err(|error| error.to_string())
-    })
+    runtime.block_on(async move { server.run().await.map_err(|error| error.to_string()) })
 }
 
 /// The address other devices on the network can reach.

@@ -13,7 +13,7 @@ import { encodeHeader } from "../src/frame.js";
 import { clientHandshake, serverHandshake } from "../src/handshake.js";
 import { SendWindow, Session } from "../src/session.js";
 import { deriveSessionKeys, fromHex, toHex } from "../src/crypto.js";
-import type { Hello } from "../src/messages.js";
+import { decodeFrameHeader, encodeFrameHeader, FRAME_HEADER_LEN, type Hello } from "../src/messages.js";
 
 class FakeSocket implements ChannelSocket {
     peer: FakeSocket | null = null;
@@ -75,6 +75,21 @@ describe("message reader", () => {
         const reader = new MessageReader();
         const header = encodeHeader({ version: 1, type: MessageType.Frame, flags: 0, seq: 1, payloadLen: 5000 });
         expect(() => reader.push(header, 1024)).toThrow(ProtocolError);
+    });
+});
+
+describe("frame header", () => {
+    it("encodes to the documented length and round trips", () => {
+        const header = {
+            ptsMs: 1234,
+            keyframe: true,
+            width: 1408,
+            height: 792,
+            codec: 2,
+        };
+        const encoded = encodeFrameHeader(header);
+        expect(encoded.length).toBe(FRAME_HEADER_LEN);
+        expect(decodeFrameHeader(encoded)).toEqual(header);
     });
 });
 

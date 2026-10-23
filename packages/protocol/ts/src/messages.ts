@@ -269,7 +269,7 @@ export function decodeDisplayInfo(bytes: Uint8Array): DisplayInfo {
     };
 }
 
-export const FRAME_HEADER_LEN = 13;
+export const FRAME_HEADER_LEN = 14;
 
 export interface FrameHeader {
     ptsMs: number;

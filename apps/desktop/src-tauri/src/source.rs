@@ -93,7 +93,7 @@ mod tests {
     fn the_synthetic_source_produces_jpeg_frames() {
         let source = SyntheticSource::new(64, 48, 70);
         let frame = source.next_frame().expect("a frame");
-        assert_eq!(frame.payload.len() > 100, true);
+        assert!(frame.payload.len() > 100);
         assert_eq!(&frame.payload[0..2], &[0xff, 0xd8]);
         assert_eq!(frame.header.codec, codec::JPEG as u8);
     }

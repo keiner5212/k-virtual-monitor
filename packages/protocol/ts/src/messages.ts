@@ -6,7 +6,7 @@
  * boundary instead of reaching the application logic.
  */
 
-import { ProtocolError } from "./frame.js";
+import { ProtocolError } from "./frame";
 
 export const MAX_NAME_LEN = 64;
 export const MAX_ERROR_TEXT = 255;

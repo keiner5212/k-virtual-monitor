@@ -7,6 +7,12 @@ allowBuilds:
     esbuild: true
     unrs-resolver: true
 
+# React Native and Metro expect a flat node_modules, the way npm builds it.
+# The default pnpm layout hides the transitive dependencies of the packages and
+# Metro cannot resolve them from the app. The Expo documentation recommends
+# this setting for every project that uses pnpm.
+nodeLinker: hoisted
+
 # Two advisories in the build tooling of the Expo CLI, with no fix available
 # for one of them. They are not part of the shipped application. Review on
 # 2027-01-01. See docs/security.md.

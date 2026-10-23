@@ -5,9 +5,9 @@
  * implementations are checked against the same golden vectors.
  */
 
-export * from "./frame.js";
-export * from "./crypto.js";
-export * from "./messages.js";
-export * from "./handshake.js";
-export * from "./session.js";
-export * from "./pairing.js";
+export * from "./frame";
+export * from "./crypto";
+export * from "./messages";
+export * from "./handshake";
+export * from "./session";
+export * from "./pairing";

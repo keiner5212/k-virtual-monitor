@@ -8,8 +8,8 @@
  * paired with the right peer.
  */
 
-import { fromHex, safetyCode, toHex, PSK_LEN } from "./crypto.js";
-import { ProtocolError } from "./frame.js";
+import { fromHex, safetyCode, toHex, PSK_LEN } from "./crypto";
+import { ProtocolError } from "./frame";
 
 const PREFIX = "kvm1:";
 const VERSION = 1;

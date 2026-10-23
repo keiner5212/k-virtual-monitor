@@ -10,8 +10,8 @@
  * injecting, so the session is closed instead of resynchronising.
  */
 
-import { open, seal, type SessionKeys, TAG_LEN } from "./crypto.js";
-import { encodeHeader, ProtocolError, type Header, type MessageType } from "./frame.js";
+import { open, seal, type SessionKeys, TAG_LEN } from "./crypto";
+import { encodeHeader, ProtocolError, type Header, type MessageType } from "./frame";
 
 export const MAX_WINDOW_FRAMES = 8;
 export const MAX_WINDOW_BYTES = 2_000_000;

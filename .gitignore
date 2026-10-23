@@ -13,6 +13,7 @@ apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/gen/
 
 # Expo / React Native
+apps/mobile/.review-export/
 apps/mobile/.expo/
 apps/mobile/dist/
 apps/mobile/android/.gradle/

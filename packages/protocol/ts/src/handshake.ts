@@ -13,8 +13,8 @@
  * ```
  */
 
-import { concat, deriveSessionKeys, proof, proofsEqual, randomBytes, type Psk, type SessionKeys } from "./crypto.js";
-import { MessageType, type MessageChannel } from "./frame.js";
+import { concat, deriveSessionKeys, proof, proofsEqual, randomBytes, type Psk, type SessionKeys } from "./crypto";
+import { MessageType, type MessageChannel } from "./frame";
 import {
     decodeChallenge,
     decodeHello,
@@ -23,7 +23,7 @@ import {
     encodeHello,
     encodeProof,
     type Hello,
-} from "./messages.js";
+} from "./messages";
 
 const CLIENT_PROOF_LABEL = new TextEncoder().encode("kvm-auth-v1|c2s");
 const SERVER_PROOF_LABEL = new TextEncoder().encode("kvm-auth-v1|s2c");

@@ -15,7 +15,7 @@ import { hkdf } from "@noble/hashes/hkdf.js";
 import { hmac } from "@noble/hashes/hmac.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 
-import { ProtocolError } from "./frame.js";
+import { ProtocolError } from "./frame";
 
 export const PSK_LEN = 32;
 export const NONCE_LEN = 32;

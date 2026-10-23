@@ -138,6 +138,14 @@ impl SendWindow {
         self.in_flight_bytes
     }
 
+    pub fn max_frames(&self) -> u64 {
+        self.max_frames
+    }
+
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes
+    }
+
     /// True when a frame of `bytes` fits in the window.
     pub fn can_send(&self, bytes: u64) -> bool {
         (self.in_flight.len() as u64) < self.max_frames

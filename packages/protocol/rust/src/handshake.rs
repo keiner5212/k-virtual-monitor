@@ -61,11 +61,27 @@ pub async fn server_handshake<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    server_handshake_with(stream, server_name, |_| Some(psk.clone())).await
+}
+
+/// Server side of the handshake, resolving the pairing secret from the
+/// greeting. The server learns which secret to use from the device id the
+/// client presents, so the device store stays outside this package.
+pub async fn server_handshake_with<S, F>(
+    stream: &mut S,
+    server_name: &str,
+    mut resolve: F,
+) -> Result<(SessionKeys, Hello), ProtocolError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnMut(&Hello) -> Option<Psk>,
+{
     let (header, payload) = read_message(stream, MAX_HANDSHAKE_PAYLOAD).await?;
     if header.kind != MessageType::Hello {
         return Err(ProtocolError::Handshake("expected HELLO"));
     }
     let hello = Hello::decode(&payload)?;
+    let psk = resolve(&hello).ok_or(ProtocolError::UnknownDevice(hello.device_id))?;
 
     let mut server_nonce = [0u8; NONCE_LEN];
     rand::rng().fill_bytes(&mut server_nonce);

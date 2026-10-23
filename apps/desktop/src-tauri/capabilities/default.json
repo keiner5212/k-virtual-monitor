@@ -1,0 +1,11 @@
+{
+    "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "default",
+    "description": "Permissions of the k-virtual-monitor main window",
+    "windows": [
+        "main"
+    ],
+    "permissions": [
+        "core:default"
+    ]
+}

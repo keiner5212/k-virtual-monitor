@@ -1,0 +1,42 @@
+{
+    "$schema": "https://schema.tauri.app/config/2",
+    "productName": "k-virtual-monitor",
+    "version": "0.1.0",
+    "identifier": "dev.kvm.app",
+    "build": {
+        "frontendDist": "../dist",
+        "devUrl": "http://localhost:1420",
+        "beforeDevCommand": "pnpm dev",
+        "beforeBuildCommand": "pnpm build"
+    },
+    "app": {
+        "windows": [
+            {
+                "title": "k-virtual-monitor",
+                "width": 900,
+                "height": 700,
+                "minWidth": 620,
+                "minHeight": 480,
+                "resizable": true,
+                "fullscreen": false,
+                "decorations": false,
+                "transparent": false
+            }
+        ],
+        "security": {
+            "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'"
+        }
+    },
+    "bundle": {
+        "active": true,
+        "targets": "all",
+        "icon": [
+            "icons/icon.ico",
+            "icons/icon.icns",
+            "icons/icon.png"
+        ],
+        "category": "Utility",
+        "shortDescription": "Virtual monitor for the desktop",
+        "longDescription": "Streams the desktop screen to a phone over the local network."
+    }
+}

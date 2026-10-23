@@ -32,3 +32,5 @@ apps/mobile/.eas/
 .env
 .env.*
 !.env.example
+
+.tmp

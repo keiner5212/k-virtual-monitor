@@ -13,7 +13,7 @@
  * ```
  */
 
-import { concat, deriveSessionKeys, proof, proofsEqual, type Psk, type SessionKeys } from "./crypto.js";
+import { concat, deriveSessionKeys, proof, proofsEqual, randomBytes, type Psk, type SessionKeys } from "./crypto.js";
 import { MessageType, type MessageChannel } from "./frame.js";
 import {
     decodeChallenge,
@@ -52,7 +52,7 @@ export async function serverHandshake(
     }
     const hello = decodeHello(first.payload);
 
-    const serverNonce = crypto.getRandomValues(new Uint8Array(32));
+    const serverNonce = randomBytes(32);
     const challenge = encodeChallenge({ serverNonce, serverName });
     channel.send(
         { version: 1, type: MessageType.Challenge, flags: 0, seq: 1, payloadLen: challenge.length },

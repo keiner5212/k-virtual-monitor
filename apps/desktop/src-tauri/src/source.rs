@@ -83,7 +83,7 @@ impl FrameSource for SyntheticSource {
                 keyframe: true,
                 width: self.width,
                 height: self.height,
-                codec: codec::JPEG as u8,
+                codec: codec::wire_value(codec::JPEG),
             },
             payload,
         })
@@ -100,7 +100,7 @@ mod tests {
         let frame = source.next_frame().expect("a frame");
         assert!(frame.payload.len() > 100);
         assert_eq!(&frame.payload[0..2], &[0xff, 0xd8]);
-        assert_eq!(frame.header.codec, codec::JPEG as u8);
+        assert_eq!(frame.header.codec, codec::wire_value(codec::JPEG));
     }
 
     #[test]

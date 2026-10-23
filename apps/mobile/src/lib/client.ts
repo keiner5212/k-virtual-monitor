@@ -13,8 +13,10 @@ import {
     decodeDisplayInfo,
     decodeFrameHeader,
     encodeFrameAck,
+    encodeHeartbeat,
     MessageChannel,
     MessageType,
+    randomBytes,
     Session,
     type ChannelSocket,
     type DisplayInfo,
@@ -26,6 +28,9 @@ import { LatestFrame, type Frame } from "./frames";
 
 /** The biggest payload the phone accepts, the same limit the server uses. */
 const MAX_PAYLOAD = 4 * 1024 * 1024;
+
+/** How often the phone says hello, so the desktop does not close the session. */
+const HEARTBEAT_MS = 30000;
 
 /** Bytes of the frame header that precede the picture. */
 const FRAME_HEADER_LEN = 14;
@@ -58,6 +63,9 @@ export class SessionClient {
     private ackedBytes = 0;
     private highestSeq = 0;
     private closing = false;
+    private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    private heartbeatSentAt = 0;
+    private lastRoundTripMs: number | null = null;
 
     constructor(
         private readonly events: ClientEvents,
@@ -128,7 +136,13 @@ export class SessionClient {
         const keys = await clientHandshake(channel, options.psk, hello);
         this.session = new Session(keys, "client");
         this.events.onState("connected");
+        this.startHeartbeat();
         void this.pump();
+    }
+
+    /** The round trip time of the last heartbeat, in milliseconds. */
+    get roundTripMs(): number | null {
+        return this.lastRoundTripMs;
     }
 
     private async pump(): Promise<void> {
@@ -158,8 +172,31 @@ export class SessionClient {
                 this.events.onDisplayInfo(decodeDisplayInfo(plaintext));
             } else if (message.header.type === MessageType.Frame) {
                 this.onFrame(plaintext, message.header.seq);
+            } else if (message.header.type === MessageType.HeartbeatAck) {
+                this.lastRoundTripMs = Date.now() - this.heartbeatSentAt;
             }
         }
+    }
+
+    /**
+     * Keeps the session alive.
+     *
+     * The server closes a session that stays silent, and a desktop with a
+     * static screen sends no frames at all, so the phone says hello every
+     * half minute.
+     */
+    private startHeartbeat(): void {
+        this.heartbeatTimer = setInterval(() => {
+            const channel = this.channel;
+            const session = this.session;
+            if (!channel || !session) {
+                return;
+            }
+            this.heartbeatSentAt = Date.now();
+            const payload = encodeHeartbeat({ clientTimeMs: this.heartbeatSentAt });
+            const sealed = session.seal(MessageType.Heartbeat, 0, payload);
+            channel.send(sealed.header, sealed.payload);
+        }, HEARTBEAT_MS);
     }
 
     private onFrame(plaintext: Uint8Array, seq: number): void {
@@ -195,6 +232,10 @@ export class SessionClient {
 
     close(): void {
         this.closing = true;
+        if (this.heartbeatTimer) {
+            clearInterval(this.heartbeatTimer);
+            this.heartbeatTimer = null;
+        }
         this.socket?.destroy();
         this.socket = null;
         this.channel = null;
@@ -286,12 +327,4 @@ export class ReconnectingClient {
             void this.attemptConnect();
         }, delay);
     }
-}
-
-function randomBytes(length: number): Uint8Array {
-    const bytes = new Uint8Array(length);
-    for (let i = 0; i < length; i += 1) {
-        bytes[i] = Math.floor(Math.random() * 256);
-    }
-    return bytes;
 }

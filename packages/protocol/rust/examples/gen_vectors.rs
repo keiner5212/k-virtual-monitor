@@ -2,10 +2,18 @@
 //!
 //! Run with `cargo run --example gen_vectors` from `packages/protocol/rust`,
 //! and write the output to `packages/protocol/testdata/vectors.json`.
+//!
+//! Every payload layout is pinned here, so the Rust and the TypeScript
+//! implementations cannot drift apart without a test failing.
 
-use kvm_protocol::crypto::{derive_session_keys, proof, Psk};
+use kvm_protocol::crypto::{derive_session_keys, proof, safety_code, Psk};
 use kvm_protocol::frame::MessageType;
 use kvm_protocol::handshake::{client_transcript, server_transcript};
+use kvm_protocol::messages::{
+    caps, codec, Close, DisplayInfo, ErrorInfo, FrameAck, FrameHeader, Heartbeat, Hello, Key,
+    Mouse, Touch,
+};
+use kvm_protocol::pairing::PairingBlob;
 use kvm_protocol::session::Session;
 
 fn hex(bytes: &[u8]) -> String {
@@ -34,6 +42,27 @@ fn main() {
     let (header, sealed) = session
         .seal(MessageType::Frame, 0, b"kvm golden frame")
         .expect("seal");
+    let (header2, sealed2) = session
+        .seal(MessageType::Frame, 0, b"kvm golden frame 2")
+        .expect("seal");
+
+    let mut server_session = Session::server(keys.clone());
+    let (server_header, server_sealed) = server_session
+        .seal(MessageType::Frame, 0, b"kvm golden frame")
+        .expect("seal");
+
+    let hello = Hello {
+        client_nonce,
+        device_id,
+        device_name: "phone".to_string(),
+        max_width: 1408,
+        max_height: 792,
+        max_fps: 30,
+        codec_mask: codec::H264 | codec::JPEG,
+        caps_requested: caps::VIEW | caps::CONTROL,
+    };
+
+    let blob = PairingBlob::new(device_id, psk.clone(), "desktop", "192.168.1.10", 28252);
 
     let json = serde_json::json!({
         "version": 1,
@@ -46,6 +75,9 @@ fn main() {
         "serverProof": hex(&server_proof),
         "sessionKeyC2s": hex(keys.client_to_server.as_bytes()),
         "sessionKeyS2c": hex(keys.server_to_client.as_bytes()),
+        "safetyCode": safety_code(&psk),
+        "pairingBlob": blob.encode(),
+        "codecPreference": codec::PREFERENCE,
         "sealedFrame": {
             "type": header.kind as u8,
             "flags": header.flags,
@@ -53,6 +85,43 @@ fn main() {
             "header": hex(&header.encode()),
             "payload": hex(&sealed),
             "plaintext": hex(b"kvm golden frame"),
+        },
+        "sealedFrame2": {
+            "seq": header2.seq,
+            "header": hex(&header2.encode()),
+            "payload": hex(&sealed2),
+            "plaintext": hex(b"kvm golden frame 2"),
+        },
+        "sealedFrameServerToClient": {
+            "seq": server_header.seq,
+            "header": hex(&server_header.encode()),
+            "payload": hex(&server_sealed),
+            "plaintext": hex(b"kvm golden frame"),
+        },
+        "payloads": {
+            "hello": hex(&hello.encode()),
+            "displayInfo": hex(&DisplayInfo {
+                width: 1408,
+                height: 792,
+                fps: 30,
+                codec: codec::wire_value(codec::JPEG),
+                granted_caps: caps::VIEW | caps::CONTROL,
+                server_name: "desktop".to_string(),
+            }.encode()),
+            "frameHeader": hex(&FrameHeader {
+                pts_ms: 1234,
+                keyframe: true,
+                width: 1408,
+                height: 792,
+                codec: codec::wire_value(codec::JPEG),
+            }.encode()),
+            "frameAck": hex(&FrameAck { acked_seq: 12, acked_bytes: 4096 }.encode()),
+            "mouse": hex(&Mouse { x: 100, y: 200, buttons: 1, pressed: true, wheel: -1 }.encode()),
+            "key": hex(&Key { keycode: 42, pressed: true, modifiers: 3 }.encode()),
+            "touch": hex(&Touch { pointer_id: 1, action: 2, x: 100, y: 200, pressure: 1024 }.encode()),
+            "heartbeat": hex(&Heartbeat { client_time_ms: 123456789 }.encode()),
+            "close": hex(&Close { reason: 0 }.encode()),
+            "error": hex(&ErrorInfo { code: 5, text: "boom".to_string() }.encode()),
         }
     });
 

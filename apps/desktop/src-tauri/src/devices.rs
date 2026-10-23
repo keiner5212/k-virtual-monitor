@@ -31,6 +31,9 @@ pub struct DeviceEntry {
     /// False until the phone completed its first handshake.
     #[serde(default)]
     pub paired: bool,
+    /// A revoked device cannot connect, even with the right secret.
+    #[serde(default)]
+    pub revoked: bool,
     /// RFC 3339 timestamp of the pairing.
     #[serde(default)]
     pub created_at: String,
@@ -124,6 +127,7 @@ mod tests {
             psk: "aa".repeat(32),
             caps: CAP_VIEW,
             paired: false,
+            revoked: false,
             created_at: "2026-01-01T00:00:00Z".to_string(),
         }
     }

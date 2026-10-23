@@ -96,3 +96,20 @@ the sender drops frames instead of queueing them.
 - [ ] `Cargo.lock` and `pnpm-lock.yaml` are committed, and the CI installs
       with `--locked`.
 - [ ] `cargo audit` and `pnpm audit` pass.
+
+## Accepted advisories
+
+Two advisories are accepted on purpose, with the date they are reviewed.
+
+| Advisory | Package | Why it is accepted |
+| --- | --- | --- |
+| GHSA-86w9-cpqp-85rv | node-forge 1.4.0 | It is in the build tooling of the Expo CLI, not in the shipped application, and there is no patched release yet. |
+| GHSA-mrhx-c7xc-m3w5 | zod 3.25.76 | Same, in the build tooling of the Expo CLI. The fix is in the 4.x line, which the CLI does not accept. |
+
+They are listed in `pnpm-workspace.yaml` under `auditConfig.ignoreGhsas`, and
+the audit fails on anything else. Review on 2027-01-01.
+
+`cargo audit` reports two informational warnings and no vulnerabilities: the
+`glib` crate that Tauri pulls in on Linux has an unsoundness advisory that is
+fixed only in a version Tauri 2 does not use yet, and `proc-macro-error` is
+unmaintained. Neither is used by our code directly.

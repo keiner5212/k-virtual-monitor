@@ -13,11 +13,34 @@ env:
     RUST_BACKTRACE: 1
 
 jobs:
+    frontend:
+        name: Frontend
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+            - uses: pnpm/action-setup@v6
+            - uses: actions/setup-node@v7
+              with:
+                  node-version: 24
+                  cache: pnpm
+            - name: Install
+              run: pnpm install --frozen-lockfile
+            - name: Typecheck
+              run: pnpm -r typecheck
+            - name: Lint
+              run: pnpm -r lint
+            - name: Test
+              run: pnpm -r test
+            - name: Build the desktop frontend
+              run: pnpm --filter @kvm/desktop build
+            - name: Audit the dependencies
+              run: pnpm audit --audit-level high
+
     rust:
         name: Rust
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v7
             - name: Install the system dependencies of the desktop app
               run: |
                   sudo apt-get update
@@ -30,6 +53,15 @@ jobs:
               with:
                   components: rustfmt, clippy
             - uses: Swatinem/rust-cache@v2
+            - uses: pnpm/action-setup@v6
+            - uses: actions/setup-node@v7
+              with:
+                  node-version: 24
+                  cache: pnpm
+            - name: Install the frontend
+              run: pnpm install --frozen-lockfile
+            - name: Build the frontend
+              run: pnpm --filter @kvm/desktop build
             - name: Format
               run: cargo fmt --all --check
             - name: Clippy
@@ -38,26 +70,3 @@ jobs:
               run: cargo test --workspace
             - name: Audit the dependencies
               run: cargo install cargo-audit --locked && cargo audit
-
-    typescript:
-        name: TypeScript
-        runs-on: ubuntu-latest
-        steps:
-            - uses: actions/checkout@v5
-            - uses: pnpm/action-setup@v4
-              with:
-                  version: 11.2.2
-            - uses: actions/setup-node@v5
-              with:
-                  node-version: 24
-                  cache: pnpm
-            - name: Install
-              run: pnpm install --frozen-lockfile
-            - name: Typecheck
-              run: pnpm -r typecheck
-            - name: Lint
-              run: pnpm -r lint
-            - name: Test
-              run: pnpm -r test
-            - name: Audit the dependencies
-              run: pnpm audit --audit-level high

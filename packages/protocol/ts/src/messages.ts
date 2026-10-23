@@ -9,7 +9,14 @@
 import { ProtocolError } from "./frame.js";
 
 export const MAX_NAME_LEN = 64;
-export const MAX_ERROR_TEXT = 256;
+export const MAX_ERROR_TEXT = 255;
+
+/**
+ * The decoder is strict: invalid UTF-8 is an error, not a replacement
+ * character. The Rust side rejects the same bytes, and the two
+ * implementations must agree.
+ */
+const strictDecoder = new TextDecoder("utf-8", { fatal: true });
 
 /** Video codecs the protocol can carry, as a bit mask. */
 export const Codec = {
@@ -37,6 +44,47 @@ export function codecName(bit: number): string {
             return "av1";
         default:
             return "unknown";
+    }
+}
+
+/**
+ * The value that travels on the wire, one byte per codec.
+ *
+ * The bit mask is used to talk about a set of codecs; the wire carries a
+ * single codec, so it has its own numbering.
+ */
+export function codecWireValue(bit: number): number {
+    switch (bit) {
+        case Codec.JPEG:
+            return 1;
+        case Codec.H264:
+            return 2;
+        case Codec.H265:
+            return 3;
+        case Codec.VP9:
+            return 4;
+        case Codec.AV1:
+            return 5;
+        default:
+            return 0;
+    }
+}
+
+/** The codec bit of a wire value. */
+export function codecFromWire(value: number): number | null {
+    switch (value) {
+        case 1:
+            return Codec.JPEG;
+        case 2:
+            return Codec.H264;
+        case 3:
+            return Codec.H265;
+        case 4:
+            return Codec.VP9;
+        case 5:
+            return Codec.AV1;
+        default:
+            return null;
     }
 }
 
@@ -96,9 +144,14 @@ class Writer {
 
     string(value: string): void {
         const raw = new TextEncoder().encode(value);
-        const trimmed = raw.subarray(0, MAX_NAME_LEN);
-        this.u16(trimmed.length);
-        this.push(trimmed);
+        // Truncate on a character boundary, so the reader never gets half a
+        // character and the two implementations agree on the bytes.
+        let end = Math.min(raw.length, MAX_NAME_LEN);
+        while (end > 0 && ((raw[end] as number) & 0xc0) === 0x80) {
+            end -= 1;
+        }
+        this.u16(end);
+        this.push(raw.subarray(0, end));
     }
 
     private push(chunk: Uint8Array): void {
@@ -162,7 +215,7 @@ class Reader {
         if (len > MAX_NAME_LEN) {
             throw new ProtocolError("name_too_long", "name is too long");
         }
-        return new TextDecoder().decode(this.take(len));
+        return strictDecoder.decode(this.take(len));
     }
 }
 
@@ -240,9 +293,13 @@ export interface ErrorInfo {
 export function encodeError(error: ErrorInfo): Uint8Array {
     const w = new Writer();
     w.u16(error.code);
-    const raw = new TextEncoder().encode(error.text).subarray(0, MAX_ERROR_TEXT);
-    w.u8(raw.length);
-    w.bytes(raw);
+    const encoded = new TextEncoder().encode(error.text);
+    let len = Math.min(encoded.length, MAX_ERROR_TEXT);
+    while (len > 0 && ((encoded[len] as number) & 0xc0) === 0x80) {
+        len -= 1;
+    }
+    w.u8(len);
+    w.bytes(encoded.subarray(0, len));
     return w.finish();
 }
 

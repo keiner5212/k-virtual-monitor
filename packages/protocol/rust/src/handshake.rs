@@ -21,7 +21,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::crypto::{self, Psk, SessionKeys, NONCE_LEN};
 use crate::error::ProtocolError;
-use crate::frame::{read_message, write_message, Header, MessageType};
+use crate::frame::{read_message_with_limit, write_message, Header, MessageType};
 use crate::limits::MAX_HANDSHAKE_PAYLOAD;
 use crate::messages::{Auth, AuthOk, Challenge, Hello};
 
@@ -76,7 +76,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     F: FnMut(&Hello) -> Option<Psk>,
 {
-    let (header, payload) = read_message(stream, MAX_HANDSHAKE_PAYLOAD).await?;
+    let (header, payload) = read_message_with_limit(stream, MAX_HANDSHAKE_PAYLOAD).await?;
     if header.kind != MessageType::Hello {
         return Err(ProtocolError::Handshake("expected HELLO"));
     }
@@ -92,7 +92,7 @@ where
     let header = Header::new(MessageType::Challenge, 1, 0, challenge.encode().len());
     write_message(stream, &header, &challenge.encode()).await?;
 
-    let (header, payload) = read_message(stream, MAX_HANDSHAKE_PAYLOAD).await?;
+    let (header, payload) = read_message_with_limit(stream, MAX_HANDSHAKE_PAYLOAD).await?;
     if header.kind != MessageType::Auth {
         return Err(ProtocolError::Handshake("expected AUTH"));
     }
@@ -134,7 +134,7 @@ where
     let header = Header::new(MessageType::Hello, 1, 0, hello.encode().len());
     write_message(stream, &header, &hello.encode()).await?;
 
-    let (header, payload) = read_message(stream, MAX_HANDSHAKE_PAYLOAD).await?;
+    let (header, payload) = read_message_with_limit(stream, MAX_HANDSHAKE_PAYLOAD).await?;
     if header.kind != MessageType::Challenge {
         return Err(ProtocolError::Handshake("expected CHALLENGE"));
     }
@@ -154,7 +154,7 @@ where
     let header = Header::new(MessageType::Auth, 2, 0, auth.encode().len());
     write_message(stream, &header, &auth.encode()).await?;
 
-    let (header, payload) = read_message(stream, MAX_HANDSHAKE_PAYLOAD).await?;
+    let (header, payload) = read_message_with_limit(stream, MAX_HANDSHAKE_PAYLOAD).await?;
     if header.kind != MessageType::AuthOk {
         return Err(ProtocolError::Handshake("expected AUTH_OK"));
     }

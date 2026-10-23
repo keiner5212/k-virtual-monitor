@@ -50,6 +50,7 @@ pub struct DeviceInfo {
     id: String,
     name: String,
     paired: bool,
+    revoked: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -118,6 +119,7 @@ fn create_pairing_entry(
         psk: hex(psk.as_bytes()),
         caps: CAP_VIEW | CAP_CONTROL,
         paired: false,
+        revoked: false,
         created_at: now_iso8601(),
     };
 
@@ -160,8 +162,23 @@ fn paired_devices(state: State<'_, AppState>) -> Vec<DeviceInfo> {
             id: entry.id.clone(),
             name: entry.name.clone(),
             paired: entry.paired,
+            revoked: entry.revoked,
         })
         .collect()
+}
+
+/// Revokes a device. The device cannot connect again, not even with the
+/// right pairing secret.
+#[tauri::command]
+fn revoke_device(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let mut store = state.store.lock().expect("store is not poisoned");
+    let Some(entry) = store.devices.iter_mut().find(|entry| entry.id == id) else {
+        return Err("no such device".to_string());
+    };
+    entry.revoked = true;
+    store
+        .save(&state.store_path)
+        .map_err(|error| error.to_string())
 }
 
 /// Builds the server and the state the commands need.
@@ -221,6 +238,7 @@ pub fn run() {
             server_status,
             create_pairing,
             paired_devices,
+            revoke_device,
             get_config,
             save_config
         ])

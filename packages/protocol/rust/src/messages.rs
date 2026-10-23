@@ -31,6 +31,33 @@ pub mod codec {
         }
     }
 
+    /// The value that travels on the wire, one byte per codec.
+    ///
+    /// The bit mask above is used to talk about a set of codecs; the wire
+    /// carries a single codec, so it gets its own numbering.
+    pub fn wire_value(bit: u16) -> u8 {
+        match bit {
+            JPEG => 1,
+            H264 => 2,
+            H265 => 3,
+            VP9 => 4,
+            AV1 => 5,
+            _ => 0,
+        }
+    }
+
+    /// The codec bit of a wire value.
+    pub fn from_wire(value: u8) -> Option<u16> {
+        match value {
+            1 => Some(JPEG),
+            2 => Some(H264),
+            3 => Some(H265),
+            4 => Some(VP9),
+            5 => Some(AV1),
+            _ => None,
+        }
+    }
+
     /// Picks the codec both ends support, the most compressed first.
     ///
     /// The client sends the codecs it can decode, the server answers with
@@ -82,8 +109,13 @@ impl Writer {
     }
 
     fn string(&mut self, value: &str) {
+        // Truncate on a character boundary, so the reader never gets half a
+        // character and the two implementations agree on the bytes.
         let raw = value.as_bytes();
-        let len = raw.len().min(MAX_NAME_LEN);
+        let mut len = raw.len().min(MAX_NAME_LEN);
+        while len > 0 && !value.is_char_boundary(len) {
+            len -= 1;
+        }
         self.u16(len as u16);
         self.bytes.extend_from_slice(&raw[..len]);
     }
@@ -266,7 +298,10 @@ impl ErrorInfo {
         let mut w = Writer::new();
         w.u16(self.code);
         let raw = self.text.as_bytes();
-        let len = raw.len().min(MAX_ERROR_TEXT);
+        let mut len = raw.len().min(MAX_ERROR_TEXT);
+        while len > 0 && !self.text.is_char_boundary(len) {
+            len -= 1;
+        }
         w.u8(len as u8);
         w.bytes(&raw[..len]);
         w.finish()

@@ -138,6 +138,23 @@ export function concat(...parts: Uint8Array[]): Uint8Array {
     return out;
 }
 
+/**
+ * Random bytes from the platform CSPRNG.
+ *
+ * The nonces of the handshake and the session keys depend on them being
+ * unpredictable, so there is no fallback to `Math.random`.
+ */
+export function randomBytes(length: number): Uint8Array {
+    const source = globalThis.crypto;
+    if (!source?.getRandomValues) {
+        throw new ProtocolError(
+            "no_csprng",
+            "the platform has no crypto.getRandomValues, the nonces cannot be generated",
+        );
+    }
+    return source.getRandomValues(new Uint8Array(length));
+}
+
 export function toHex(bytes: Uint8Array): string {
     let out = "";
     for (const byte of bytes) {
@@ -152,7 +169,13 @@ export function fromHex(text: string): Uint8Array {
     }
     const out = new Uint8Array(text.length / 2);
     for (let i = 0; i < out.length; i += 1) {
-        out[i] = Number.parseInt(text.slice(i * 2, i * 2 + 2), 16);
+        const pair = text.slice(i * 2, i * 2 + 2);
+        if (!/^[0-9a-fA-F]{2}$/.test(pair)) {
+            // A mistyped code must be an error, never a zero byte: a pairing
+            // secret of zeros is still a secret.
+            throw new ProtocolError("bad_hex", `not a hex byte: ${pair}`);
+        }
+        out[i] = Number.parseInt(pair, 16);
     }
     return out;
 }

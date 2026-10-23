@@ -146,9 +146,40 @@ impl Header {
     }
 }
 
-/// Reads one message. The payload length is checked against `max_payload`
-/// before any buffer is reserved, so a hostile peer cannot make us allocate.
+/// Reads one message. The payload length is checked against the limit of the
+/// message type before any buffer is reserved, so a hostile peer cannot make
+/// us allocate more than the type allows.
 pub async fn read_message<R: AsyncRead + Unpin>(
+    reader: &mut R,
+) -> Result<(Header, Vec<u8>), ProtocolError> {
+    let mut raw = [0u8; HEADER_LEN];
+    reader
+        .read_exact(&mut raw)
+        .await
+        .map_err(|err| classify_read(err, "reading message header"))?;
+    let header = Header::decode(&raw)?;
+    let limit = crate::limits::max_payload(header.kind);
+    let len = header.payload_len as usize;
+    if len > limit {
+        return Err(ProtocolError::PayloadTooLarge {
+            kind: header.kind.name(),
+            actual: len,
+            limit,
+        });
+    }
+    let mut payload = vec![0u8; len];
+    if len > 0 {
+        reader
+            .read_exact(&mut payload)
+            .await
+            .map_err(|err| classify_read(err, "reading message payload"))?;
+    }
+    Ok((header, payload))
+}
+
+/// Reads one message with an explicit limit, for the cases where the caller
+/// knows a tighter bound than the one of the message type.
+pub async fn read_message_with_limit<R: AsyncRead + Unpin>(
     reader: &mut R,
     max_payload: usize,
 ) -> Result<(Header, Vec<u8>), ProtocolError> {
@@ -248,7 +279,7 @@ mod tests {
         tokio::spawn(async move {
             client.write_all(&raw).await.unwrap();
         });
-        let err = read_message(&mut server, 1024).await.unwrap_err();
+        let err = read_message(&mut server).await.unwrap_err();
         assert!(matches!(
             err,
             ProtocolError::PayloadTooLarge {

@@ -73,8 +73,8 @@ server -> client   AUTH_OK    proof
 - `PSK` is the 32 byte pairing secret, shared during pairing.
 
 Both nonces are in the transcript, so a captured handshake cannot be replayed
-on another connection, and the server proof binds the session to the server
-that answered.
+on another connection, and the server proof shows that the other end knows
+the pairing secret too.
 
 The handshake must finish within 10 seconds and before any frame is sent.
 
@@ -124,6 +124,17 @@ The picture is encoded in the codec of the stream. The JPEG codec is a plain
 JPEG file. The H.264 codec is a sequence of length prefixed access units,
 each one a NAL unit without its start code.
 
+The codec is one byte, and the same numbering is used in the DISPLAY_INFO
+message and in the frame header:
+
+```text
+0 none   1 JPEG   2 H.264   3 H.265   4 VP9   5 AV1
+```
+
+The client sends the codecs it can decode as a bit mask in the HELLO, and the
+server answers with the codec it will use. Both sides run the same order of
+preference, the most compressed first: AV1, H.265, H.264, VP9, JPEG.
+
 The client acknowledges frames on receipt, before decoding, so a slow decoder
 never blocks the server.
 
@@ -166,13 +177,20 @@ a secret on its own.
 
 ## Limits
 
+The limit is applied per message type, before the payload is read, so a peer
+can never make the other end reserve more memory than the type allows.
+
 | Limit | Value |
 | --- | --- |
-| Maximum payload | 4 MiB |
-| Maximum handshake payload | 1 KiB |
-| Maximum input payload | 4 KiB |
+| Maximum payload, a frame | 4 MiB |
+| Maximum payload, the handshake | 1 KiB |
+| Maximum payload, an input message | 4 KiB |
+| Maximum payload, an acknowledgement | 64 bytes |
 | Maximum name length | 64 bytes |
 | Maximum sessions | 4 |
 | Maximum pending handshakes | 8 |
 | Handshake deadline | 10 s |
 | Session idle timeout | 120 s |
+
+The desktop enforces the session and handshake limits; the phone enforces
+the payload limits.

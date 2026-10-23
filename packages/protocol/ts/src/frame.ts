@@ -21,6 +21,17 @@ export const PROTOCOL_VERSION = 1;
 export const HEADER_LEN = 18;
 export const MAGIC = 0x4b; // "K"
 
+/** The biggest payload any message may carry. */
+export const MAX_PAYLOAD = 4 * 1024 * 1024;
+/** The biggest payload a handshake message may carry. */
+export const MAX_HANDSHAKE_PAYLOAD = 1024;
+/** The biggest payload an input message may carry. */
+export const MAX_INPUT_PAYLOAD = 4 * 1024;
+/** The biggest payload a frame may carry. */
+export const MAX_FRAME_PAYLOAD = 4 * 1024 * 1024;
+/** The biggest payload an acknowledgement may carry. */
+export const MAX_ACK_PAYLOAD = 64;
+
 export const MessageType = {
     Hello: 0,
     Challenge: 1,
@@ -39,6 +50,31 @@ export const MessageType = {
 } as const;
 
 export type MessageType = (typeof MessageType)[keyof typeof MessageType];
+
+/**
+ * The biggest payload a message of this type may carry.
+ *
+ * The limit is applied before the payload is read, so a peer cannot make the
+ * other end reserve more memory than the message type allows.
+ */
+export function maxPayload(type: MessageType): number {
+    switch (type) {
+        case MessageType.Hello:
+        case MessageType.Challenge:
+        case MessageType.Auth:
+        case MessageType.AuthOk:
+        case MessageType.DisplayInfo:
+            return MAX_HANDSHAKE_PAYLOAD;
+        case MessageType.Frame:
+            return MAX_FRAME_PAYLOAD;
+        case MessageType.InputMouse:
+        case MessageType.InputKey:
+        case MessageType.InputTouch:
+            return MAX_INPUT_PAYLOAD;
+        default:
+            return MAX_ACK_PAYLOAD;
+    }
+}
 
 const MESSAGE_NAMES: Record<number, string> = {
     0: "HELLO",
@@ -121,13 +157,14 @@ export function decodeHeader(bytes: Uint8Array): Header {
 /**
  * Splits a byte stream into messages.
  *
- * The payload length is checked against the limit before the payload is
- * copied out, so a hostile peer cannot make the client allocate.
+ * The payload length is checked against the limit of the message type before
+ * the payload is copied out, so a hostile peer cannot make the client
+ * allocate more than the type allows.
  */
 export class MessageReader {
     private buffer = new Uint8Array(0);
 
-    push(chunk: Uint8Array, maxPayload: number): Message[] {
+    push(chunk: Uint8Array, overallLimit: number = MAX_PAYLOAD): Message[] {
         const merged = new Uint8Array(this.buffer.length + chunk.length);
         merged.set(this.buffer, 0);
         merged.set(chunk, this.buffer.length);
@@ -140,10 +177,11 @@ export class MessageReader {
                 break;
             }
             const header = decodeHeader(this.buffer.subarray(offset, offset + HEADER_LEN));
-            if (header.payloadLen > maxPayload) {
+            const limit = Math.min(maxPayload(header.type), overallLimit);
+            if (header.payloadLen > limit) {
                 throw new ProtocolError(
                     "payload_too_large",
-                    `payload of ${header.payloadLen} bytes exceeds the limit of ${maxPayload}`,
+                    `payload of ${header.payloadLen} bytes exceeds the limit of ${limit}`,
                 );
             }
             const total = HEADER_LEN + header.payloadLen;

@@ -14,21 +14,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use kvm_protocol::crypto::Psk;
+use kvm_protocol::crypto::TAG_LEN;
 use kvm_protocol::frame::{read_message, write_message, Header, MessageType};
 use kvm_protocol::handshake::server_handshake_with;
-use kvm_protocol::limits::MAX_PAYLOAD;
 use kvm_protocol::messages::{caps, codec, DisplayInfo, FrameAck, Heartbeat, Hello};
 use kvm_protocol::session::{SendWindow, Session};
-use kvm_protocol::ProtocolError;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use crate::config::ServerConfig;
 use crate::devices::DeviceStore;
 use crate::source::{EncodedFrame, FrameSource};
-
-/// A connection that is still doing its handshake.
-const PENDING_LIMIT: usize = 8;
 
 /// What the live session is doing, for the user interface.
 #[derive(Debug, Clone, Default)]
@@ -96,7 +93,9 @@ impl Server {
     pub async fn serve(self: Arc<Self>, listener: TcpListener) -> std::io::Result<()> {
         loop {
             let (stream, peer) = listener.accept().await?;
-            if self.pending.load(Ordering::Relaxed) >= PENDING_LIMIT {
+            // The slot is taken before the task is spawned, so a burst of
+            // connections cannot spawn more tasks than the limit allows.
+            if !self.reserve_pending() {
                 tracing::warn!(%peer, "too many pending handshakes, dropping the connection");
                 drop(stream);
                 continue;
@@ -105,6 +104,46 @@ impl Server {
             tokio::spawn(async move {
                 server.handle(stream, peer).await;
             });
+        }
+    }
+
+    /// Takes a pending handshake slot, or refuses when there are too many.
+    fn reserve_pending(&self) -> bool {
+        let limit = self.config.max_pending_handshakes.max(1);
+        let mut current = self.pending.load(Ordering::Relaxed);
+        loop {
+            if current >= limit {
+                return false;
+            }
+            match self.pending.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Takes a session slot, or refuses when the server is full.
+    fn reserve_session(&self) -> bool {
+        let limit = self.config.max_sessions.max(1);
+        let mut current = self.sessions.load(Ordering::Relaxed);
+        loop {
+            if current >= limit {
+                return false;
+            }
+            match self.sessions.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
         }
     }
 
@@ -118,7 +157,6 @@ impl Server {
         if let Err(error) = stream.set_nodelay(true) {
             tracing::warn!(%peer, %error, "cannot disable Nagle");
         }
-        self.pending.fetch_add(1, Ordering::Relaxed);
         let handshake = tokio::time::timeout(
             Duration::from_secs(self.config.handshake_timeout_secs),
             server_handshake_with(&mut stream, &self.config.server_name, |hello| {
@@ -146,18 +184,26 @@ impl Server {
                 return;
             };
             let mut entry = entry;
+            if entry.revoked {
+                tracing::info!(%peer, device = %entry.name, "the device was revoked");
+                return;
+            }
+            let renamed = entry.name != hello.device_name;
             entry.name = hello.device_name.clone();
             entry.paired = true;
             store.upsert(entry.clone());
-            entry
+            (entry, renamed)
         };
-        if let Err(error) = self
-            .store
-            .lock()
-            .expect("device store is not poisoned")
-            .save(&self.store_path)
-        {
-            tracing::error!(%error, "cannot save the device store");
+        let (entry, renamed) = entry;
+        if renamed {
+            if let Err(error) = self
+                .store
+                .lock()
+                .expect("device store is not poisoned")
+                .save(&self.store_path)
+            {
+                tracing::error!(%error, "cannot save the device store");
+            }
         }
 
         let Some(codec) = codec::negotiate(hello.codec_mask, self.source.codecs()) else {
@@ -165,13 +211,17 @@ impl Server {
             return;
         };
 
+        if !self.reserve_session() {
+            tracing::warn!(%peer, "the server is full, refusing the session");
+            return;
+        }
+
         tracing::info!(
             %peer,
             device = %entry.name,
             codec = codec::name(codec),
             "session started"
         );
-        self.sessions.fetch_add(1, Ordering::Relaxed);
         let result = self
             .run_session(stream, keys, entry.caps, codec, entry.name.clone())
             .await;
@@ -186,7 +236,10 @@ impl Server {
         let id = hex(&hello.device_id);
         let store = self.store.lock().expect("device store is not poisoned");
         let entry = store.find(&id)?;
-        Psk::from_slice(&hex_bytes(&entry.psk)).ok()
+        if entry.revoked {
+            return None;
+        }
+        Psk::from_slice(&hex_bytes(&entry.psk)?).ok()
     }
 
     async fn run_session(
@@ -204,7 +257,7 @@ impl Server {
             width: self.config.width,
             height: self.config.height,
             fps: self.config.fps,
-            codec: codec as u8,
+            codec: codec::wire_value(codec),
             granted_caps,
             server_name: self.config.server_name.clone(),
         };
@@ -238,84 +291,123 @@ impl Server {
             }
         });
 
-        let idle = Duration::from_secs(self.config.session_idle_timeout_secs);
-        loop {
-            enum Event {
-                Message(Result<(Header, Vec<u8>), kvm_protocol::ProtocolError>),
-                Frame(Option<EncodedFrame>),
+        // The reader lives in its own task. A `select!` that reads from the
+        // socket directly would cancel a half read message when the other
+        // branch wins, and the bytes of that message would be lost: the
+        // stream would desynchronise and every message after it would be
+        // garbage.
+        let (mut reader, mut writer) = tokio::io::split(stream);
+        let (message_tx, mut message_rx) = mpsc::channel::<(Header, Vec<u8>)>(8);
+        let reader_task = tokio::spawn(async move {
+            while let Ok(message) = read_message(&mut reader).await {
+                if message_tx.send(message).await.is_err() {
+                    break;
+                }
             }
+        });
 
-            let event = if window.in_flight_frames() >= window.max_frames() {
-                Event::Message(
-                    tokio::time::timeout(idle, read_message(&mut stream, MAX_PAYLOAD))
-                        .await
-                        .unwrap_or(Err(ProtocolError::Violation("session idle"))),
-                )
-            } else {
-                tokio::select! {
-                    message = tokio::time::timeout(idle, read_message(&mut stream, MAX_PAYLOAD)) => {
-                        Event::Message(message.unwrap_or(Err(ProtocolError::Violation("session idle"))))
-                    }
-                    frame = frame_rx.recv() => Event::Frame(frame),
+        let result = async {
+            let idle = Duration::from_secs(self.config.session_idle_timeout_secs);
+            let mut idle_deadline = tokio::time::Instant::now() + idle;
+            loop {
+                enum Event {
+                    Message(Option<(Header, Vec<u8>)>),
+                    Frame(Option<EncodedFrame>),
+                    Idle,
                 }
-            };
 
-            match event {
-                Event::Message(Ok((header, payload))) => {
-                    if !self
-                        .handle_client_message(
-                            header,
-                            &payload,
-                            &mut window,
-                            &mut session,
-                            &mut stream,
-                            granted_caps,
-                        )
-                        .await?
-                    {
-                        return Ok(());
+                let event = if window.in_flight_frames() >= window.max_frames() {
+                    // The window is full: wait for an acknowledgement, not for a
+                    // frame to drop.
+                    tokio::select! {
+                        message = message_rx.recv() => Event::Message(message),
+                        _ = tokio::time::sleep_until(idle_deadline) => Event::Idle,
                     }
-                }
-                Event::Message(Err(error)) => return Err(error.to_string()),
-                Event::Frame(Some(frame)) => {
-                    self.send_frame(frame, &mut window, &mut session, &mut stream)
-                        .await?;
-                    frames_sent += 1;
-                    frames_this_second += 1;
-                }
-                Event::Frame(None) => return Ok(()),
-            }
+                } else {
+                    tokio::select! {
+                        message = message_rx.recv() => Event::Message(message),
+                        frame = frame_rx.recv() => Event::Frame(frame),
+                        _ = tokio::time::sleep_until(idle_deadline) => Event::Idle,
+                    }
+                };
 
-            if second_started.elapsed() >= Duration::from_secs(1) {
-                let fps = frames_this_second as u16;
-                if let Ok(mut info) = self.session_info.lock() {
-                    if let Some(info) = info.as_mut() {
-                        info.fps = fps;
-                        info.frames_sent = frames_sent;
+                match event {
+                    Event::Message(Some((header, payload))) => {
+                        idle_deadline = tokio::time::Instant::now() + idle;
+                        if !self
+                            .handle_client_message(
+                                header,
+                                &payload,
+                                &mut window,
+                                &mut session,
+                                &mut writer,
+                                granted_caps,
+                            )
+                            .await?
+                        {
+                            return Ok(());
+                        }
                     }
+                    Event::Message(None) => return Ok(()),
+                    Event::Frame(Some(frame)) => {
+                        if self
+                            .send_frame(frame, &mut window, &mut session, &mut writer)
+                            .await?
+                        {
+                            frames_sent += 1;
+                            frames_this_second += 1;
+                        }
+                    }
+                    Event::Frame(None) => return Ok(()),
+                    Event::Idle => return Err("the session was idle".to_string()),
                 }
-                frames_this_second = 0;
-                second_started = std::time::Instant::now();
+
+                if second_started.elapsed() >= Duration::from_secs(1) {
+                    let fps = frames_this_second as u16;
+                    if let Ok(mut info) = self.session_info.lock() {
+                        if let Some(info) = info.as_mut() {
+                            info.fps = fps;
+                            info.frames_sent = frames_sent;
+                        }
+                    }
+                    frames_this_second = 0;
+                    second_started = std::time::Instant::now();
+                }
             }
         }
+        .await;
+
+        // The reader holds the other half of the socket. It has to go, or
+        // the connection stays open after the session is over.
+        reader_task.abort();
+        let _ = writer.shutdown().await;
+        result
     }
 
-    async fn handle_client_message(
+    /// Handles one message from the client.
+    ///
+    /// The payload is opened before anything is read out of it: the tag is
+    /// verified first, so a tampered message is rejected before it can be
+    /// acted on. The sequence number is checked by the same call.
+    async fn handle_client_message<W: AsyncWrite + Unpin>(
         &self,
         header: Header,
         payload: &[u8],
         window: &mut SendWindow,
         session: &mut Session,
-        stream: &mut TcpStream,
+        stream: &mut W,
         granted_caps: u8,
     ) -> Result<bool, String> {
+        let plaintext = session
+            .open(&header, payload)
+            .map_err(|error| format!("the message was rejected: {error}"))?;
         match header.kind {
             MessageType::FrameAck => {
-                let ack = FrameAck::decode(payload).map_err(|error| error.to_string())?;
+                let ack = FrameAck::decode(&plaintext).map_err(|error| error.to_string())?;
                 window.ack(ack.acked_seq);
             }
             MessageType::Heartbeat => {
-                let payload = Heartbeat::decode(payload)
+                let payload = Heartbeat::decode(&plaintext)
                     .map_err(|error| error.to_string())?
                     .encode();
                 let (header, sealed) = session
@@ -329,15 +421,15 @@ impl Server {
                 if granted_caps & caps::CONTROL == 0 {
                     tracing::warn!(
                         kind = header.kind.name(),
-                        "input from a device without control rights"
+                        "input from a device without control rights, closing the session"
                     );
-                } else {
-                    tracing::debug!(
-                        kind = header.kind.name(),
-                        bytes = payload.len(),
-                        "input received"
-                    );
+                    return Ok(false);
                 }
+                tracing::debug!(
+                    kind = header.kind.name(),
+                    bytes = plaintext.len(),
+                    "input received"
+                );
             }
             MessageType::Close => return Ok(false),
             other => {
@@ -347,28 +439,29 @@ impl Server {
         Ok(true)
     }
 
-    async fn send_frame(
+    /// Sends one frame. Returns false when the frame was dropped because the
+    /// window is full: a late frame is worth less than a fresh one.
+    async fn send_frame<W: AsyncWrite + Unpin>(
         &self,
         frame: EncodedFrame,
         window: &mut SendWindow,
         session: &mut Session,
-        stream: &mut TcpStream,
-    ) -> Result<(), String> {
-        let size = frame.payload.len() as u64;
-        if !window.can_send(size) {
-            // The client is behind. Drop this frame instead of growing the
-            // queue: a late frame is worth less than a fresh one.
-            return Ok(());
-        }
+        stream: &mut W,
+    ) -> Result<bool, String> {
         let mut plaintext = frame.header.encode();
         plaintext.extend_from_slice(&frame.payload);
+        let size = plaintext.len() as u64 + TAG_LEN as u64;
+        if !window.can_send(size) {
+            return Ok(false);
+        }
         let (header, sealed) = session
             .seal(MessageType::Frame, 0, &plaintext)
             .map_err(|error| error.to_string())?;
         window.push(header.seq, sealed.len() as u64);
         write_message(stream, &header, &sealed)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        Ok(true)
     }
 }
 
@@ -376,8 +469,13 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn hex_bytes(text: &str) -> Vec<u8> {
+/// Decodes a hex string. A corrupt value is an error, not a zero byte: a
+/// device with a broken secret must not be able to connect.
+fn hex_bytes(text: &str) -> Option<Vec<u8>> {
+    if text.len() % 2 != 0 {
+        return None;
+    }
     (0..text.len() / 2)
-        .map(|i| u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).unwrap_or(0))
+        .map(|i| u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok())
         .collect()
 }

@@ -12,7 +12,6 @@ import { decodePairingBlob } from "@kvm/protocol";
 
 const SECRET_KEY = "kvm.pairing.secret";
 const META_KEY = "kvm.pairing.meta";
-const DEVICE_ID_KEY = "kvm.device.id";
 
 interface PairingMeta {
     deviceId: string;
@@ -22,6 +21,8 @@ interface PairingMeta {
 }
 
 export interface StoredPairing extends PairingMeta {
+    /** The bytes of the device id, as they travel in the handshake. */
+    deviceIdBytes: Uint8Array;
     psk: Uint8Array;
 }
 
@@ -35,7 +36,7 @@ export async function savePairing(blob: string): Promise<StoredPairing> {
     };
     await SecureStore.setItemAsync(SECRET_KEY, hex(parsed.psk));
     await AsyncStorage.setItem(META_KEY, JSON.stringify(meta));
-    return { ...meta, psk: parsed.psk };
+    return { ...meta, deviceIdBytes: parsed.deviceId, psk: parsed.psk };
 }
 
 export async function loadPairing(): Promise<StoredPairing | null> {
@@ -48,7 +49,11 @@ export async function loadPairing(): Promise<StoredPairing | null> {
         return null;
     }
     const meta = JSON.parse(raw) as PairingMeta;
-    return { ...meta, psk: unhex(secret) };
+    return {
+        ...meta,
+        deviceIdBytes: unhex(meta.deviceId),
+        psk: unhex(secret),
+    };
 }
 
 export async function clearPairing(): Promise<void> {
@@ -57,20 +62,14 @@ export async function clearPairing(): Promise<void> {
 }
 
 /**
- * The id of this phone. It is generated once and kept, so the desktop can
- * recognise the device across pairings.
+ * The id of this phone.
+ *
+ * The desktop generates it during the pairing and puts it in the code, so
+ * both ends agree on the id that selects the pairing secret. The phone
+ * never invents one.
  */
-export async function deviceId(): Promise<Uint8Array> {
-    const stored = await AsyncStorage.getItem(DEVICE_ID_KEY);
-    if (stored) {
-        return unhex(stored);
-    }
-    const bytes = new Uint8Array(16);
-    for (let i = 0; i < bytes.length; i += 1) {
-        bytes[i] = Math.floor(Math.random() * 256);
-    }
-    await AsyncStorage.setItem(DEVICE_ID_KEY, hex(bytes));
-    return bytes;
+export function deviceIdBytes(pairing: StoredPairing): Uint8Array {
+    return pairing.deviceIdBytes;
 }
 
 function hex(bytes: Uint8Array): string {

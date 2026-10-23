@@ -17,10 +17,9 @@ import { codecMask, type AppSettings } from "./settings";
 interface UseSessionOptions {
     pairing: StoredPairing | null;
     settings: AppSettings;
-    deviceId: Uint8Array | null;
 }
 
-export function useSession({ pairing, settings, deviceId }: UseSessionOptions) {
+export function useSession({ pairing, settings }: UseSessionOptions) {
     const [state, setState] = useState<ConnectionState>("idle");
     const [detail, setDetail] = useState<string | null>(null);
     const [info, setInfo] = useState<DisplayInfo | null>(null);
@@ -36,7 +35,7 @@ export function useSession({ pairing, settings, deviceId }: UseSessionOptions) {
     }, [settings]);
 
     const connect = useCallback(() => {
-        if (!pairing || !deviceId) {
+        if (!pairing) {
             return;
         }
         const current = settingsRef.current;
@@ -45,7 +44,7 @@ export function useSession({ pairing, settings, deviceId }: UseSessionOptions) {
                 host: pairing.host,
                 port: pairing.port,
                 psk: pairing.psk,
-                deviceId,
+                deviceId: pairing.deviceIdBytes,
                 codecMask: codecMask(current.codecPreference),
                 caps: 0b11,
                 maxWidth: current.maxWidth,
@@ -65,10 +64,10 @@ export function useSession({ pairing, settings, deviceId }: UseSessionOptions) {
         clientRef.current = client;
         setClient(client);
         client.start();
-    }, [deviceId, pairing]);
+    }, [pairing]);
 
     useEffect(() => {
-        if (!pairing || !deviceId) {
+        if (!pairing) {
             return;
         }
         const timer = setTimeout(connect, 0);
@@ -77,7 +76,7 @@ export function useSession({ pairing, settings, deviceId }: UseSessionOptions) {
             clientRef.current?.stop();
             clientRef.current = null;
         };
-    }, [connect, deviceId, pairing]);
+    }, [connect, pairing]);
 
     useEffect(() => {
         if (!client) {

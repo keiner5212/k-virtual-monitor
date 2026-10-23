@@ -6,3 +6,11 @@ packages:
 allowBuilds:
     esbuild: true
     unrs-resolver: true
+
+# Two advisories in the build tooling of the Expo CLI, with no fix available
+# for one of them. They are not part of the shipped application. Review on
+# 2027-01-01. See docs/security.md.
+auditConfig:
+    ignoreGhsas:
+        - GHSA-86w9-cpqp-85rv
+        - GHSA-mrhx-c7xc-m3w5

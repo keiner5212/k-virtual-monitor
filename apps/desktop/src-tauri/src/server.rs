@@ -17,7 +17,7 @@ use kvm_protocol::crypto::Psk;
 use kvm_protocol::frame::{read_message, write_message, Header, MessageType};
 use kvm_protocol::handshake::server_handshake_with;
 use kvm_protocol::limits::MAX_PAYLOAD;
-use kvm_protocol::messages::{caps, DisplayInfo, FrameAck, Heartbeat, Hello};
+use kvm_protocol::messages::{caps, codec, DisplayInfo, FrameAck, Heartbeat, Hello};
 use kvm_protocol::session::{SendWindow, Session};
 use kvm_protocol::ProtocolError;
 use tokio::net::{TcpListener, TcpStream};
@@ -30,6 +30,15 @@ use crate::source::{EncodedFrame, FrameSource};
 /// A connection that is still doing its handshake.
 const PENDING_LIMIT: usize = 8;
 
+/// What the live session is doing, for the user interface.
+#[derive(Debug, Clone, Default)]
+pub struct SessionInfo {
+    pub device_name: String,
+    pub codec: u16,
+    pub fps: u16,
+    pub frames_sent: u64,
+}
+
 pub struct Server {
     config: ServerConfig,
     store: Arc<Mutex<DeviceStore>>,
@@ -37,6 +46,7 @@ pub struct Server {
     source: Arc<dyn FrameSource>,
     sessions: Arc<AtomicUsize>,
     pending: Arc<AtomicUsize>,
+    session_info: Arc<Mutex<Option<SessionInfo>>>,
 }
 
 impl Server {
@@ -53,6 +63,7 @@ impl Server {
             source,
             sessions: Arc::new(AtomicUsize::new(0)),
             pending: Arc::new(AtomicUsize::new(0)),
+            session_info: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -66,6 +77,11 @@ impl Server {
 
     pub fn store(&self) -> &Arc<Mutex<DeviceStore>> {
         &self.store
+    }
+
+    /// What the live session is doing, if there is one.
+    pub fn session_info(&self) -> Option<SessionInfo> {
+        self.session_info.lock().ok().and_then(|info| info.clone())
     }
 
     /// Binds the listener. The port may be zero, in which case the system
@@ -144,10 +160,25 @@ impl Server {
             tracing::error!(%error, "cannot save the device store");
         }
 
-        tracing::info!(%peer, device = %entry.name, "session started");
+        let Some(codec) = codec::negotiate(hello.codec_mask, self.source.codecs()) else {
+            tracing::info!(%peer, "the client cannot decode any codec we produce");
+            return;
+        };
+
+        tracing::info!(
+            %peer,
+            device = %entry.name,
+            codec = codec::name(codec),
+            "session started"
+        );
         self.sessions.fetch_add(1, Ordering::Relaxed);
-        let result = self.run_session(stream, keys, entry.caps).await;
+        let result = self
+            .run_session(stream, keys, entry.caps, codec, entry.name.clone())
+            .await;
         self.sessions.fetch_sub(1, Ordering::Relaxed);
+        if let Ok(mut info) = self.session_info.lock() {
+            *info = None;
+        }
         tracing::info!(%peer, ?result, "session ended");
     }
 
@@ -163,6 +194,8 @@ impl Server {
         mut stream: TcpStream,
         keys: kvm_protocol::crypto::SessionKeys,
         granted_caps: u8,
+        codec: u16,
+        device_name: String,
     ) -> Result<(), String> {
         let mut session = Session::server(keys);
         let mut window = SendWindow::default();
@@ -171,7 +204,7 @@ impl Server {
             width: self.config.width,
             height: self.config.height,
             fps: self.config.fps,
-            codec: 0,
+            codec: codec as u8,
             granted_caps,
             server_name: self.config.server_name.clone(),
         };
@@ -182,6 +215,18 @@ impl Server {
         write_message(&mut stream, &header, &sealed)
             .await
             .map_err(|error| error.to_string())?;
+
+        let mut frames_sent = 0u64;
+        let mut frames_this_second = 0u64;
+        let mut second_started = std::time::Instant::now();
+        if let Ok(mut info) = self.session_info.lock() {
+            *info = Some(SessionInfo {
+                device_name,
+                codec,
+                fps: 0,
+                frames_sent: 0,
+            });
+        }
 
         let (frame_tx, mut frame_rx) = mpsc::channel::<EncodedFrame>(4);
         let source = self.source.clone();
@@ -235,8 +280,22 @@ impl Server {
                 Event::Frame(Some(frame)) => {
                     self.send_frame(frame, &mut window, &mut session, &mut stream)
                         .await?;
+                    frames_sent += 1;
+                    frames_this_second += 1;
                 }
                 Event::Frame(None) => return Ok(()),
+            }
+
+            if second_started.elapsed() >= Duration::from_secs(1) {
+                let fps = frames_this_second as u16;
+                if let Ok(mut info) = self.session_info.lock() {
+                    if let Some(info) = info.as_mut() {
+                        info.fps = fps;
+                        info.frames_sent = frames_sent;
+                    }
+                }
+                frames_this_second = 0;
+                second_started = std::time::Instant::now();
             }
         }
     }

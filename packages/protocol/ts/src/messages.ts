@@ -40,6 +40,22 @@ export function codecName(bit: number): string {
     }
 }
 
+/**
+ * Picks the codec both ends support, the most compressed first.
+ *
+ * The client sends the codecs it can decode, the server answers with the
+ * one it will use. Both sides run the same order, so the answer does not
+ * depend on who asks.
+ */
+export function negotiateCodec(clientMask: number, serverMask: number): number | null {
+    for (const bit of CODEC_PREFERENCE) {
+        if ((clientMask & bit) !== 0 && (serverMask & bit) !== 0) {
+            return bit;
+        }
+    }
+    return null;
+}
+
 /** Capabilities a paired device may hold. */
 export const Caps = {
     /** May receive the screen. */

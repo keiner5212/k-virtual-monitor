@@ -5,9 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServerConfig {
     /// TCP port for the data channel.
@@ -66,6 +66,21 @@ impl ServerConfig {
         Ok(config)
     }
 
+    /// Writes the configuration. The parent directory is created if it is
+    /// missing and the file is written atomically, so a crash cannot leave a
+    /// half written configuration behind.
+    pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
+        self.validate()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let text = toml::to_string_pretty(self)?;
+        let temp = path.with_extension("toml.tmp");
+        std::fs::write(&temp, text)?;
+        std::fs::rename(&temp, path)?;
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.width == 0 || self.height == 0 {
             return Err(ConfigError::Invalid(
@@ -119,6 +134,8 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error("cannot parse the configuration: {0}")]
     Parse(#[from] toml::de::Error),
+    #[error("cannot write the configuration: {0}")]
+    Write(#[from] toml::ser::Error),
     #[error("invalid configuration: {0}")]
     Invalid(String),
 }

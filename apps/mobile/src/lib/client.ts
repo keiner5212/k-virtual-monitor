@@ -54,12 +54,17 @@ export class SessionClient {
     private socket: TcpSocket.Socket | null = null;
     private channel: MessageChannel | null = null;
     private session: Session | null = null;
-    private readonly frames = new LatestFrame();
+    private readonly frames: LatestFrame;
     private ackedBytes = 0;
     private highestSeq = 0;
     private closing = false;
 
-    constructor(private readonly events: ClientEvents) { }
+    constructor(
+        private readonly events: ClientEvents,
+        frames: LatestFrame = new LatestFrame(),
+    ) {
+        this.frames = frames;
+    }
 
     get latestFrame(): LatestFrame {
         return this.frames;
@@ -195,6 +200,91 @@ export class SessionClient {
         this.channel = null;
         this.session = null;
         this.events.onState("idle");
+    }
+}
+
+/**
+ * A client that keeps the session alive.
+ *
+ * The desktop may go away at any moment: it sleeps, the router reboots, the
+ * phone walks out of range. The client comes back on its own, with a delay
+ * that grows up to a ceiling, so a desktop that is really gone is not
+ * hammered with a connection attempt every second.
+ */
+export class ReconnectingClient {
+    private client: SessionClient | null = null;
+    private timer: ReturnType<typeof setTimeout> | null = null;
+    private attempt = 0;
+    private stopped = false;
+    private readonly frameBuffer = new LatestFrame();
+
+    constructor(
+        private readonly options: ConnectOptions,
+        private readonly events: ClientEvents & { onReconnectIn: (seconds: number | null) => void },
+        private readonly policy: { delayMs: number; maxDelayMs: number },
+    ) { }
+
+    get frames(): LatestFrame {
+        return this.frameBuffer;
+    }
+
+    start(): void {
+        this.stopped = false;
+        void this.attemptConnect();
+    }
+
+    stop(): void {
+        this.stopped = true;
+        if (this.timer) {
+            clearTimeout(this.timer);
+            this.timer = null;
+        }
+        this.client?.close();
+        this.client = null;
+        this.events.onReconnectIn(null);
+    }
+
+    private async attemptConnect(): Promise<void> {
+        if (this.stopped) {
+            return;
+        }
+        const client = new SessionClient(
+            {
+                onState: (state, detail) => {
+                    this.events.onState(state, detail);
+                    if (state === "closed" || state === "error") {
+                        this.scheduleRetry();
+                    }
+                },
+                onDisplayInfo: (info) => {
+                    this.attempt = 0;
+                    this.events.onDisplayInfo(info);
+                },
+            },
+            this.frameBuffer,
+        );
+        this.client = client;
+        try {
+            await client.connect(this.options);
+        } catch (cause) {
+            this.events.onState("error", cause instanceof Error ? cause.message : String(cause));
+            this.scheduleRetry();
+        }
+    }
+
+    private scheduleRetry(): void {
+        if (this.stopped || this.timer) {
+            return;
+        }
+        const delay = Math.min(this.policy.delayMs * 2 ** this.attempt, this.policy.maxDelayMs);
+        this.attempt += 1;
+        this.events.onReconnectIn(Math.round(delay / 1000));
+        this.timer = setTimeout(() => {
+            this.timer = null;
+            this.events.onReconnectIn(null);
+            this.client?.close();
+            void this.attemptConnect();
+        }, delay);
     }
 }
 

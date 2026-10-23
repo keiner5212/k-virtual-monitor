@@ -21,6 +21,11 @@ pub struct EncodedFrame {
 pub trait FrameSource: Send + Sync {
     /// Blocks until the next frame is ready. `None` ends the stream.
     fn next_frame(&self) -> Option<EncodedFrame>;
+
+    /// The codecs this source can produce, as a bit mask.
+    fn codecs(&self) -> u16 {
+        codec::JPEG
+    }
 }
 
 /// A test pattern, encoded as JPEG.

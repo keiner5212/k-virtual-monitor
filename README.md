@@ -19,7 +19,6 @@ apps/
 packages/
   protocol/        The wire protocol, implemented in Rust and TypeScript.
 docs/              Architecture, protocol, security, decisions.
-legacy/            The previous Python spacedesk compatible server.
 ```
 
 The protocol is the contract between the two apps. It lives in
@@ -85,13 +84,6 @@ The two implementations of the protocol are checked against
 ```bash
 cd packages/protocol/rust && cargo run --example gen_vectors > ../testdata/vectors.json
 ```
-
-## Legacy
-
-`legacy/spacedesk-linux-server` is the previous implementation: a Python
-server that spoke the spacedesk protocol. It is kept for reference, mostly
-for the XDG portal capture and input injection work, and it is not built by
-the CI.
 
 ## License
 

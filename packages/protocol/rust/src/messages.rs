@@ -30,6 +30,18 @@ pub mod codec {
             _ => "unknown",
         }
     }
+
+    /// Picks the codec both ends support, the most compressed first.
+    ///
+    /// The client sends the codecs it can decode, the server answers with
+    /// the one it will use. Both sides run the same order, so the answer
+    /// does not depend on who asks.
+    pub fn negotiate(client_mask: u16, server_mask: u16) -> Option<u16> {
+        PREFERENCE
+            .iter()
+            .find(|bit| client_mask & **bit != 0 && server_mask & **bit != 0)
+            .copied()
+    }
 }
 
 /// Capabilities a paired device may hold.

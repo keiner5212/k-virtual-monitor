@@ -40,6 +40,16 @@ pub struct ServerStatus {
     address: String,
     sessions: usize,
     paired_devices: usize,
+    codec: Option<String>,
+    fps: Option<u16>,
+    device_name: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct DeviceInfo {
+    id: String,
+    name: String,
+    paired: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -51,6 +61,7 @@ pub struct PairingInfo {
 
 #[tauri::command]
 fn server_status(state: State<'_, AppState>) -> ServerStatus {
+    let session = state.server.session_info();
     ServerStatus {
         running: true,
         port: state.config.port,
@@ -61,7 +72,28 @@ fn server_status(state: State<'_, AppState>) -> ServerStatus {
             .lock()
             .expect("store is not poisoned")
             .paired_count(),
+        codec: session
+            .as_ref()
+            .map(|info| kvm_protocol::messages::codec::name(info.codec).to_uppercase()),
+        fps: session.as_ref().map(|info| info.fps),
+        device_name: session.map(|info| info.device_name),
     }
+}
+
+/// The configuration the server is running with.
+#[tauri::command]
+fn get_config(state: State<'_, AppState>) -> ServerConfig {
+    state.config.clone()
+}
+
+/// Writes the configuration. The listener is not restarted, so the port and
+/// the bind address only change on the next start of the application.
+#[tauri::command]
+fn save_config(config: ServerConfig) -> Result<ServerConfig, String> {
+    config
+        .save(&config::config_path())
+        .map_err(|error| error.to_string())?;
+    Ok(config)
 }
 
 #[tauri::command]
@@ -119,13 +151,16 @@ pub fn print_pairing() -> Result<(), String> {
 }
 
 #[tauri::command]
-fn paired_devices(state: State<'_, AppState>) -> Vec<String> {
+fn paired_devices(state: State<'_, AppState>) -> Vec<DeviceInfo> {
     let store = state.store.lock().expect("store is not poisoned");
     store
         .devices
         .iter()
-        .filter(|entry| entry.paired)
-        .map(|entry| entry.name.clone())
+        .map(|entry| DeviceInfo {
+            id: entry.id.clone(),
+            name: entry.name.clone(),
+            paired: entry.paired,
+        })
         .collect()
 }
 
@@ -185,7 +220,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             server_status,
             create_pairing,
-            paired_devices
+            paired_devices,
+            get_config,
+            save_config
         ])
         .run(tauri::generate_context!())
         .expect("cannot start the application");

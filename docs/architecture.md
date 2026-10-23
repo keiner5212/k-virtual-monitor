@@ -1,5 +1,7 @@
 # Architecture
 
+The flows are drawn in [flows.md](flows.md).
+
 ## The pieces
 
 ```text

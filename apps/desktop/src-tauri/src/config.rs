@@ -104,6 +104,9 @@ impl ServerConfig {
 
 /// Path of the configuration file, following the XDG base directory spec.
 pub fn config_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("KVM_CONFIG_PATH") {
+        return PathBuf::from(path);
+    }
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -117,6 +120,9 @@ pub fn config_path() -> PathBuf {
 
 /// Path of the paired device store.
 pub fn device_store_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("KVM_STORE_PATH") {
+        return PathBuf::from(path);
+    }
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {

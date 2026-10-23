@@ -21,6 +21,7 @@ export interface DeviceInfo {
     id: string;
     name: string;
     paired: boolean;
+    revoked: boolean;
 }
 
 export interface ServerConfig {
@@ -48,6 +49,10 @@ export function createPairing(): Promise<PairingInfo> {
 
 export function pairedDevices(): Promise<DeviceInfo[]> {
     return invoke<DeviceInfo[]>("paired_devices");
+}
+
+export function revokeDevice(id: string): Promise<void> {
+    return invoke<void>("revoke_device", { id });
 }
 
 export function getConfig(): Promise<ServerConfig> {

@@ -1,30 +1,37 @@
 {
-    "expo": {
-        "name": "k-virtual-monitor",
-        "slug": "k-virtual-monitor",
-        "version": "0.1.0",
-        "orientation": "landscape",
-        "userInterfaceStyle": "dark",
-        "backgroundColor": "#101014",
-        "android": {
-            "package": "dev.kvm.app",
-            "permissions": [
-                "CAMERA",
-                "INTERNET",
-                "ACCESS_NETWORK_STATE"
-            ],
-            "edgeToEdgeEnabled": true
-        },
-        "ios": {
-            "bundleIdentifier": "dev.kvm.app"
-        },
-        "plugins": [
-            [
-                "expo-camera",
-                {
-                    "cameraPermission": "The camera is used to scan the pairing code of the desktop."
-                }
-            ]
-        ]
+  "expo": {
+    "name": "k-virtual-monitor",
+    "slug": "k-virtual-monitor",
+    "version": "0.1.0",
+    "orientation": "landscape",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#101014",
+    "android": {
+      "package": "dev.kvm.app",
+      "permissions": [
+        "CAMERA",
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ],
+      "edgeToEdgeEnabled": true
+    },
+    "ios": {
+      "bundleIdentifier": "dev.kvm.app"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "The camera is used to scan the pairing code of the desktop."
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "28d0fe1f-767d-4e10-8022-5415e56b519b"
+      }
     }
+  }
 }

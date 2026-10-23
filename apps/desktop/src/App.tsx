@@ -9,6 +9,7 @@ import {
     createPairing,
     getConfig,
     pairedDevices,
+    revokeDevice,
     saveConfig,
     serverStatus,
     type DeviceInfo,
@@ -114,6 +115,15 @@ export default function App() {
             setError(cause instanceof Error ? cause.message : String(cause));
         }
     }, []);
+
+    const revoke = useCallback(async (id: string) => {
+        try {
+            await revokeDevice(id);
+            await refresh();
+        } catch (cause) {
+            setError(cause instanceof Error ? cause.message : String(cause));
+        }
+    }, [refresh]);
 
     const copyBlob = useCallback(async () => {
         if (!pairing) {
@@ -296,6 +306,38 @@ export default function App() {
                                 Create pairing code
                             </button>
                         </div>
+                    )}
+                </section>
+
+                <section className="mx-4 mb-6 rounded-panel border border-border-subtle bg-surface-raised p-5 lg:mx-6">
+                    <h2 className="font-sans text-base font-semibold text-ink">Paired devices</h2>
+                    {devices.length === 0 ? (
+                        <p className="mt-2 font-sans text-sm text-ink-muted">
+                            No phone paired yet. Create a pairing code and scan it with the phone.
+                        </p>
+                    ) : (
+                        <ul className="mt-3 flex flex-col gap-2">
+                            {devices.map((device) => (
+                                <li
+                                    key={device.id}
+                                    className="flex items-center justify-between gap-3 rounded-lg border border-border-subtle bg-surface px-3 py-2"
+                                >
+                                    <span className="font-mono text-sm text-ink">
+                                        {device.name}
+                                        {device.revoked ? " (revoked)" : device.paired ? "" : " (pending)"}
+                                    </span>
+                                    {device.revoked ? null : (
+                                        <button
+                                            type="button"
+                                            className={ghostButton}
+                                            onClick={() => void revoke(device.id)}
+                                        >
+                                            Revoke
+                                        </button>
+                                    )}
+                                </li>
+                            ))}
+                        </ul>
                     )}
                 </section>
 

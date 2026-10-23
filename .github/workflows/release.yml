@@ -1,9 +1,8 @@
 name: "Create Releases"
 
+# The release is built only when it is asked for. A push to main must not
+# create a draft on every commit.
 on:
-    push:
-        branches:
-            - main
     workflow_dispatch:
 
 jobs:

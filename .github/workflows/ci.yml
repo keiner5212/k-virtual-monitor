@@ -67,5 +67,7 @@ jobs:
               run: cargo clippy --workspace --all-targets -- -D warnings
             - name: Test
               run: cargo test --workspace
+            - name: Check that the two implementations of the protocol talk to each other
+              run: pnpm --filter @kvm/protocol test
             - name: Audit the dependencies
               run: cargo install cargo-audit --locked && cargo audit

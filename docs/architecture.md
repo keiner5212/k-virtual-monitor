@@ -72,11 +72,12 @@ size. With a hardware decoder the limit moves to the network.
 
 1. Protocol, both implementations, golden vectors. Done.
 2. Desktop server: handshake, frame window, synthetic source. Done.
-3. Desktop server: XDG portal capture and input injection.
-4. Phone: pairing by QR code, session, frame display.
-5. Phone: touch, mouse and keyboard input.
-6. Codecs: H.264 with hardware encode and decode, JPEG as the fallback.
-7. Packaging: the desktop bundle, the APK, and the release workflow.
+3. Desktop app: status screen, pairing, settings, window buttons. Done.
+4. Phone app: pairing by QR code, session, frame display, settings. Done.
+5. Desktop server: XDG portal capture and input injection.
+6. Phone: touch, mouse and keyboard input.
+7. Codecs: H.264 with hardware encode and decode, JPEG as the fallback.
+8. Packaging: the desktop bundle and the APK.
 
 ## Known gaps
 
@@ -84,5 +85,8 @@ size. With a hardware decoder the limit moves to the network.
   twice and will not hold 30 fps. The next step is a native view that takes
   the bytes without the round trip through the bridge.
 - The synthetic source is a placeholder for the real capture.
-- The input messages are parsed but not injected anywhere yet.
+- The input messages are parsed and the capability is enforced, but the
+  events are not injected into the desktop yet.
 - There is no discovery. The address comes from the pairing code.
+- The phone sends the input events it captures, but the touch surface that
+  maps the finger to the desktop is not built yet.

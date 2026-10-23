@@ -4,7 +4,7 @@
 //! implementation and consumed by the TypeScript one. Both must agree, so
 //! the two ends of a session cannot drift apart silently.
 
-use kvm_protocol::crypto::{derive_session_keys, proof, Psk, SessionKey};
+use kvm_protocol::crypto::{derive_session_keys, proof, Psk};
 use kvm_protocol::frame::{Header, MessageType};
 use kvm_protocol::handshake::{client_transcript, server_transcript};
 use kvm_protocol::session::Session;

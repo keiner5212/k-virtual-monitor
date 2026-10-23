@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Image, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 
-import { codecName } from "@kvm/protocol";
+import { codecFromWire, codecName } from "@kvm/protocol";
 
 import { clearPairing, loadPairing, savePairing, type StoredPairing } from "./src/lib/pairing";
 import { ensureCsprng } from "./src/lib/random";
@@ -133,9 +133,9 @@ export default function App() {
                             <Text
                                 style={styles.overlayText}
                                 accessibilityRole="text"
-                                accessibilityLabel={`Stream: ${codecName(session.info.codec)}, ${session.info.width} by ${session.info.height}, ${session.info.fps} frames per second`}
+                                accessibilityLabel={`Stream: ${streamCodec(session.info.codec)}, ${session.info.width} by ${session.info.height}, ${session.info.fps} frames per second`}
                             >
-                                {codecName(session.info.codec).toUpperCase()} · {session.info.width}x
+                                {streamCodec(session.info.codec)} · {session.info.width}x
                                 {session.info.height} · {session.info.fps} fps
                             </Text>
                         </View>
@@ -192,6 +192,12 @@ function TabButton({
             <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>{label}</Text>
         </Pressable>
     );
+}
+
+/** The codec of the live session, from the wire value the server sent. */
+function streamCodec(wireValue: number): string {
+    const bit = codecFromWire(wireValue);
+    return bit === null ? "unknown" : codecName(bit).toUpperCase();
 }
 
 function stateTitle(state: string): string {

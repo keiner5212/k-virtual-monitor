@@ -1,0 +1,27 @@
+{
+    "name": "k-virtual-monitor",
+    "private": true,
+    "version": "0.1.0",
+    "type": "module",
+    "description": "Virtual monitor for the desktop, controlled from a phone",
+    "packageManager": "pnpm@11.2.2",
+    "engines": {
+        "node": ">=22.13",
+        "pnpm": ">=9"
+    },
+    "scripts": {
+        "dev:desktop": "pnpm --filter @kvm/desktop tauri dev",
+        "build:desktop": "pnpm --filter @kvm/desktop tauri build",
+        "test": "pnpm -r test",
+        "lint": "pnpm -r lint",
+        "typecheck": "pnpm -r typecheck",
+        "format": "prettier --write .",
+        "format:check": "prettier --check .",
+        "cargo:test": "cargo test --workspace",
+        "cargo:lint": "cargo clippy --workspace --all-targets -- -D warnings",
+        "cargo:fmt": "cargo fmt --all"
+    },
+    "devDependencies": {
+        "prettier": "3.9.6"
+    }
+}

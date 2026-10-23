@@ -1,0 +1,22 @@
+[package]
+name = "kvm-protocol"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Wire protocol for k-virtual-monitor: framing, pairing, session crypto"
+license = "MIT"
+
+[dependencies]
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2.6"
+thiserror = "2.0"
+zeroize = { version = "1.8", features = ["derive"] }
+rand = "0.9"
+tokio = { version = "1", features = ["io-util"] }
+
+[dev-dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread"] }

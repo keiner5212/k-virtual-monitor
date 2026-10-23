@@ -1,210 +1,98 @@
-# SpaceDesk Linux Server
+# k-virtual-monitor
 
-Use an Android tablet as a second screen for your Linux PC, with the official
-spacedesk app, no patching.
+Turn a desktop into a virtual monitor you can see and control from a phone.
 
-## Credits
+The desktop app captures the screen, encodes it and streams it over the local
+network. The phone app receives the stream, decodes it and sends back touch,
+mouse and keyboard input. Both ends are our own software, so the wire
+protocol, the reconnect behaviour and the latency are under our control.
 
-This project is a fork of
-**[leabergero/spacedesk-linux-server](https://github.com/leabergero/spacedesk-linux-server)**
-by **Leandro Bergero** (MIT). That project did the hard part: it reverse
-engineered the proprietary spacedesk wire protocol from the official app and
-built the server that speaks it.
+This is a clean room implementation. It does not speak the spacedesk wire
+format and it does not reuse any spacedesk code or assets.
 
-This fork changes three things:
+## Layout
 
-- Capture and input now go through the **XDG desktop portals** instead of
-  Mutter's private GNOME D-Bus, so it runs on **KDE Plasma 6** as well as GNOME.
-  (The old backend could not work anywhere Mutter was not running.)
-- The **USB (Android Open Accessory) transport was removed**. WiFi only, which
-  is what most people want and keeps the setup simple.
-- Everything adjustable moved to **`config.ini`**, with `install.sh` and
-  `start.sh` to set it up and run it.
+```text
+apps/
+  desktop/         Tauri v2 app: the server. Rust backend, React UI.
+  mobile/          Expo app: the phone client. Android first.
+packages/
+  protocol/        The wire protocol, implemented in Rust and TypeScript.
+docs/              Architecture, protocol, security, decisions.
+legacy/            The previous Python spacedesk compatible server.
+```
 
-Full history of what was tried: [ESTADO.md](ESTADO.md).
+The protocol is the contract between the two apps. It lives in
+`packages/protocol` and exists twice, in Rust and in TypeScript, checked
+against the same golden vectors so the two ends cannot drift apart.
 
-## Requirements
+## Phone app (Android)
 
-Debian or Ubuntu with **KDE Plasma 6+ (or GNOME 42+) on Wayland**, Python 3.10+,
-and an Android tablet with the official spacedesk app.
+The phone client is an Expo app.
 
-Full list, package names per distribution, and how to verify them:
-**[SYSTEM_REQUIREMENTS.md](SYSTEM_REQUIREMENTS.md)**.
+Download: **TODO(keiner): add the link to the APK here once the release build
+is generated with Expo.**
 
-## Install
+The app is also published from this repository:
+
+- `apps/mobile` holds the source.
+- A release build is produced with `eas build` and published as an APK.
+
+## Desktop app
+
+The desktop app is a Tauri v2 app. The server part is a plain Rust library, so
+it can run headless and be tested without a webview.
 
 ```bash
-cd linux-server
-./install.sh
+pnpm install
+pnpm dev:desktop          # run the app in development
+pnpm build:desktop        # build the bundle
 ```
 
-That installs the system packages, creates the venv, and checks that your
-desktop can do screen capture. Run `./install.sh --check` any time to see the
-status of the prerequisites.
-
-## Run
+The headless server, useful for a machine without a desktop session:
 
 ```bash
-./start.sh
+cargo run -p kvm-desktop -- --headless
 ```
 
-Then open the spacedesk app on the tablet. It finds the server automatically
-over WiFi (UDP broadcast on port 28252), or you can type the PC IP in by hand.
+## Protocol
 
-Discovery works by replying to the app's broadcast with the 308 byte struct it
-expects (name in UTF-16LE, IP, port, OS type, capability flags). See
-`protocol.build_discovery_response`. Set the name shown in the app's server list
-with `server.name` in `config.ini`.
+Read `docs/protocol-v1.md` for the wire format, the handshake and the flow
+control rules. The short version:
 
-**The first time a client connects**, a KDE permission dialog appears asking to
-share the screen and the input device. Approve it. A virtual monitor is created
-and shows up in your display settings, so you can drag windows onto it.
+- TCP, one session per connection.
+- Pairing once per phone, by QR code, with a six digit safety code both sides
+  show so the user can confirm the pairing.
+- Every message after the handshake is sealed with ChaCha20-Poly1305, with
+  the header as associated data.
+- A window of frames in flight, so the frame rate is not bounded by the round
+  trip time. This is the difference that made the previous server stop at
+  12 fps on a 70 ms link.
 
-## Configure
-
-Everything is in `linux-server/config.ini`.
-
-| Option | Default | What it does |
-| --- | --- | --- |
-| `server.port` | 28252 | Data and discovery port |
-| `server.name` | spacedesk-linux | Name shown in the app's server list |
-| `server.log_level` | INFO | DEBUG / INFO / WARNING / ERROR |
-| `capture.width` / `capture.height` | 1600 / 900 | Framebuffer shown on the tablet (1:1, never scaled). Lowering it is the most effective lever against lag |
-| `capture.jpeg_quality` | 55 | Starting JPEG quality |
-| `capture.adaptive_quality` | true | Adjust quality automatically to hold the latency target |
-| `capture.jpeg_quality_min` / `max` | 30 / 90 | Bounds for the automatic adjustment |
-| `capture.target_latency_ms` | 250 | Latency the automatic adjustment aims for |
-| `capture.cursor_mode` | 2 | 1 hidden, 2 drawn into the frame, 4 as stream metadata |
-| `capture.source_type` | 4 | 4 virtual monitor, 1 mirror a physical screen, 5 ask |
-| `capture.persist_permissions` | true | Remember the permission dialog between runs |
-| `discovery.enabled` | true | Answer the app's UDP broadcast so it finds the server |
-
-Use a different file: `./start.sh --config my.ini`
-
-## How it works
-
-1. The tablet connects over TCP to port 28252 and sends an `Identification`.
-2. The server asks the desktop portal for a screen + input session
-   (`ScreenCast` with `types=VIRTUAL`, `RemoteDesktop`).
-3. Plasma creates a real virtual monitor and returns a PipeWire stream.
-4. GStreamer turns that stream into JPEG frames, sent as `FrameBuffer`
-   packets, waiting for a `FlowControlAck` before each one.
-5. Touch, mouse and keyboard come back as packets and are replayed into the
-   portal session, in the coordinate space of the captured stream.
-
-```
-linux-server/
-├── install.sh              # install system packages + venv
-├── start.sh                # run the server
-├── config.ini              # all settings
-├── main.py                 # entry point (--config)
-└── spacedesk_server/
-    ├── config.py           # reads and validates config.ini
-    ├── protocol.py         # 128 byte packet header, enums, pack/unpack
-    ├── capture.py          # portal screen cast + GStreamer -> JPEG
-    ├── input.py            # portal remote desktop input injection
-    ├── server.py           # TCP + WebSocket server, per client sender/receiver
-    ├── ws_transport.py     # WebSocket framing
-    └── discovery.py        # answers the UDP broadcast
-```
-
-More detail: [SYSTEM_REQUIREMENTS.md](SYSTEM_REQUIREMENTS.md) for the system
-packages and how to verify them, [ESTADO.md](ESTADO.md) for what was tried and
-what still needs checking with a real tablet.
-
-## Diagnosing
+## Development
 
 ```bash
-./start.sh --debug
+pnpm test             # TypeScript tests
+pnpm lint             # eslint
+pnpm typecheck        # tsc
+cargo test            # Rust tests
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-`--debug` logs every packet the client sends (type, payload length and the raw
-128 byte header in hex), the full `Identification` fields, and the GStreamer
-pipeline state.
+The two implementations of the protocol are checked against
+`packages/protocol/testdata/vectors.json`. Regenerate it with:
 
-Two things are logged at every log level because they mean protocol drift:
-
-- `Paquete DESCONOCIDO(N) sin manejar` - a packet type the server does not know.
-  If the app starts sending types this server has no handler for, the protocol
-  moved and `protocol.py` needs updating.
-- `Paquetes recibidos de <addr>: ...` - a census per connection. Useful to see
-  at a glance what the client actually sends.
-
-Currently unimplemented but defined in the protocol: `DISPLAY_SETTINGS(4)`,
-`ROTATION(9)` and `AUDIO(14)`.
-
-## Performance
-
-The protocol forces the server to wait for the tablet's `FlowControlAck` before
-sending the next frame, so **fps is roughly the inverse of the round trip**: a
-bigger frame takes longer to transfer and decode, which delays its own ACK. That
-is why cutting JPEG quality alone barely moved the frame rate - it was only part
-of the loop.
-
-While a client is connected the server logs real numbers every 5 seconds:
-
-```
-Stats: enviados 12.4 fps (58 KB/frame), capturado 30.0 fps, latencia ACK 190 ms, jpeg=42, 1600x900
+```bash
+cd packages/protocol/rust && cargo run --example gen_vectors > ../testdata/vectors.json
 ```
 
-- `enviados` is what the tablet is actually getting.
-- `capturado` is what the desktop is producing. If that one is high and
-  `enviados` is low, the bottleneck is the tablet or the network, not the PC.
+## Legacy
 
-With `capture.adaptive_quality = true` the JPEG quality moves in steps to hold
-`capture.target_fps`, and never exceeds the quality the tablet asks for in its
-`Identification`.
-
-Things that matter, roughly in order:
-
-1. **Total bytes per frame**, which is resolution times JPEG quality. Two frames
-   with the same size cost the same, so 1280x720 at quality 70 looks sharper
-   than 1600x900 at quality 35.
-2. **JPEG quality.** What the automatic mode adjusts.
-3. **The keep-alive.** When nothing changes on screen the last frame repeats
-   briefly so the app does not report low bandwidth.
-
-The PC side is not the constraint here: the capture pipeline sustains the full
-30 fps of the stream at 1600x900 on this machine.
-
-## Troubleshooting
-
-**`No se pudo crear la captura: ...`** in the log
-
-Logged once. The server keeps listening and rejects clients with a one line
-message instead of a traceback per reconnect. Common causes:
-
-- Not a Wayland session. A plain X11 session has no screen capture portal.
-- The portal cannot create a virtual monitor here. Run `./install.sh --check`;
-  if `AvailableSourceTypes` has no `4`, set `capture.source_type = 1` to mirror
-  a physical screen instead.
-- The permission dialog was dismissed or timed out (180 s).
-
-**Black screen but connected**
-
-- Check that the virtual monitor appears in your display settings. If it does
-  not, the portal did not create it; read the log.
-- Turn on `server.log_level = DEBUG` to see the real frame caps.
-- Lower `capture.jpeg_quality` if the image is cut off.
-
-**Touch does nothing**
-
-Look for `Dispositivos de input otorgados:` in the log. It must be `7`
-(keyboard 1 + pointer 2 + touchscreen 4). Anything less means the dialog did not
-grant everything; accept it again.
-
-**The permission dialog appears every run**
-
-The portal backend did not accept `persist_permissions`. Harmless, just approve
-it once more each time.
-
-## References
-
-- Upstream project: [leabergero/spacedesk-linux-server](https://github.com/leabergero/spacedesk-linux-server)
-- spacedesk protocol notes: <https://github.com/datronicsoft/SpaceDesk-protocol-documentation>
-- [org.freedesktop.portal.ScreenCast](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html)
-- [org.freedesktop.portal.RemoteDesktop](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop.html)
+`legacy/spacedesk-linux-server` is the previous implementation: a Python
+server that spoke the spacedesk protocol. It is kept for reference, mostly
+for the XDG portal capture and input injection work, and it is not built by
+the CI.
 
 ## License
 
-MIT, same as the upstream project.
+MIT. See `LICENSE`.

@@ -10,7 +10,7 @@ pub mod server;
 pub mod source;
 
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use kvm_protocol::crypto::Psk;
@@ -66,6 +66,16 @@ fn server_status(state: State<'_, AppState>) -> ServerStatus {
 
 #[tauri::command]
 fn create_pairing(state: State<'_, AppState>) -> Result<PairingInfo, String> {
+    let mut store = state.store.lock().expect("store is not poisoned");
+    create_pairing_entry(&state.config, &mut store, &state.store_path)
+}
+
+/// Creates a pairing code and stores the device as pending.
+fn create_pairing_entry(
+    config: &ServerConfig,
+    store: &mut DeviceStore,
+    store_path: &Path,
+) -> Result<PairingInfo, String> {
     let mut device_id = [0u8; 16];
     rand::rng().fill_bytes(&mut device_id);
     let psk = Psk::generate();
@@ -79,20 +89,15 @@ fn create_pairing(state: State<'_, AppState>) -> Result<PairingInfo, String> {
         created_at: now_iso8601(),
     };
 
-    {
-        let mut store = state.store.lock().expect("store is not poisoned");
-        store.upsert(entry);
-        store
-            .save(&state.store_path)
-            .map_err(|error| error.to_string())?;
-    }
+    store.upsert(entry);
+    store.save(store_path).map_err(|error| error.to_string())?;
 
     let blob = PairingBlob::new(
         device_id,
         psk,
-        &state.config.server_name,
+        &config.server_name,
         &local_address(),
-        state.config.port,
+        config.port,
     );
 
     Ok(PairingInfo {
@@ -100,6 +105,17 @@ fn create_pairing(state: State<'_, AppState>) -> Result<PairingInfo, String> {
         safety_code: format_safety_code(blob.safety_code()),
         expires_in_seconds: PAIRING_TTL_SECONDS,
     })
+}
+
+/// Prints a pairing code, for the headless mode.
+pub fn print_pairing() -> Result<(), String> {
+    let config = ServerConfig::load(&config::config_path()).map_err(|error| error.to_string())?;
+    let store_path = config::device_store_path();
+    let mut store = DeviceStore::load(&store_path).unwrap_or_default();
+    let info = create_pairing_entry(&config, &mut store, &store_path)?;
+    println!("pairing code: {}", info.blob);
+    println!("safety code:  {}", info.safety_code);
+    Ok(())
 }
 
 #[tauri::command]

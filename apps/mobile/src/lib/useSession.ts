@@ -17,17 +17,30 @@ import { codecMask, type AppSettings } from "./settings";
 interface UseSessionOptions {
     pairing: StoredPairing | null;
     settings: AppSettings;
-    /** Bumped when the user changes the stream, so the phone reconnects with the new selection. */
+    /** The session stays down until the user opens a desktop from the home cards. */
+    active: boolean;
+    /** Changes each time the user opens a desktop, so the last error is not shown again. */
+    openId: number;
+    /** Bumped when the user changes the stream or asks to try the connection again. */
     reloadToken: number;
     onDisplayInfo?: (info: DisplayInfo) => void;
 }
 
-export function useSession({ pairing, settings, reloadToken, onDisplayInfo }: UseSessionOptions) {
+export function useSession({ pairing, settings, active, openId, reloadToken, onDisplayInfo }: UseSessionOptions) {
     const [state, setState] = useState<ConnectionState>("idle");
     const [detail, setDetail] = useState<string | null>(null);
     const [info, setInfo] = useState<DisplayInfo | null>(null);
     const [frame, setFrame] = useState<Frame | null>(null);
     const [reconnectingIn, setReconnectingIn] = useState<number | null>(null);
+    const [trackedOpen, setTrackedOpen] = useState(openId);
+    if (trackedOpen !== openId) {
+        setTrackedOpen(openId);
+        setState("connecting");
+        setDetail(null);
+        setInfo(null);
+        setFrame(null);
+        setReconnectingIn(null);
+    }
 
     const clientRef = useRef<ReconnectingClient | null>(null);
     const settingsRef = useRef(settings);
@@ -75,7 +88,7 @@ export function useSession({ pairing, settings, reloadToken, onDisplayInfo }: Us
     }, [pairing]);
 
     useEffect(() => {
-        if (!pairing) {
+        if (!pairing || !active) {
             return;
         }
         const timer = setTimeout(connect, 0);
@@ -84,7 +97,7 @@ export function useSession({ pairing, settings, reloadToken, onDisplayInfo }: Us
             clientRef.current?.stop();
             clientRef.current = null;
         };
-    }, [connect, pairing, reloadToken]);
+    }, [connect, pairing, active, reloadToken]);
 
     useEffect(() => {
         if (!client) {

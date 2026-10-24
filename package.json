@@ -1,7 +1,7 @@
 {
     "name": "k-virtual-monitor",
     "private": true,
-    "version": "0.1.1",
+    "version": "0.1.2",
     "type": "module",
     "description": "Virtual monitor for the desktop, controlled from a phone",
     "packageManager": "pnpm@11.2.2",
@@ -15,6 +15,7 @@
         "test": "pnpm -r test",
         "lint": "pnpm -r lint",
         "typecheck": "pnpm -r typecheck",
+        "changelog": "node scripts/changelog.mjs",
         "format": "prettier --write .",
         "format:check": "prettier --check .",
         "cargo:test": "cargo test --workspace",

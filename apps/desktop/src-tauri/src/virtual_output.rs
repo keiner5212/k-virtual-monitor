@@ -329,7 +329,12 @@ fn portal_request(
 
 fn object_path(value: Option<&OwnedValue>) -> Result<OwnedObjectPath, String> {
     let value = value.ok_or("the portal did not return a session")?;
-    OwnedObjectPath::try_from(value.clone()).map_err(|error| error.to_string())
+    if let Ok(path) = OwnedObjectPath::try_from(value.clone()) {
+        return Ok(path);
+    }
+    // KDE sends the session path as a string variant, not an object path.
+    let text = String::try_from(value.clone()).map_err(|error| error.to_string())?;
+    OwnedObjectPath::try_from(text).map_err(|error| error.to_string())
 }
 
 fn first_node(results: &HashMap<String, OwnedValue>) -> Result<u32, String> {

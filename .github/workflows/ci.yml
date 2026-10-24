@@ -22,6 +22,8 @@ jobs:
               with:
                   node-version: 24
                   cache: pnpm
+            - name: Require a changelog entry for this version
+              run: node scripts/changelog.mjs
             - name: Install
               run: pnpm install --frozen-lockfile
             - name: Typecheck

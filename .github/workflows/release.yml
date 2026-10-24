@@ -1,12 +1,15 @@
 name: "Create Releases"
 
-# The release is built only when it is asked for. A push to main must not
-# create a draft on every commit.
+# CI on main is the gate. A pull request does not publish.
 on:
-    workflow_dispatch:
+    workflow_run:
+        workflows: ["CI"]
+        types: [completed]
+        branches: [main]
 
 jobs:
     publish-tauri:
+        if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' }}
         permissions:
             contents: write
         # Only Linux for now: the desktop app is the Linux server, and the
@@ -16,6 +19,8 @@ jobs:
         steps:
             - name: Checkout repo
               uses: actions/checkout@v7
+              with:
+                  ref: ${{ github.event.workflow_run.head_sha }}
 
             - name: Install pnpm
               uses: pnpm/action-setup@v6
@@ -25,6 +30,9 @@ jobs:
               with:
                   node-version: 22.13
                   cache: "pnpm"
+
+            - name: Require a changelog entry for this version
+              run: node scripts/changelog.mjs
 
             - name: Install Rust stable
               uses: dtolnay/rust-toolchain@stable
@@ -47,20 +55,15 @@ jobs:
             - name: Install frontend dependencies
               run: pnpm install --frozen-lockfile
 
-            - name: Typecheck
-              run: pnpm -r typecheck
-
-            - name: Test
-              run: pnpm -r test
-
-            - name: Lint
-              run: pnpm -r lint
-
-            - name: Test the Rust workspace
-              run: cargo test --workspace
-
-            - name: Build frontend
-              run: pnpm --filter @kvm/desktop build
+            - name: Read the app version
+              id: app-version
+              run: |
+                  version=$(node -p "require('./apps/desktop/package.json').version")
+                  echo "version=${version}" >> "$GITHUB_OUTPUT"
+                  delimiter="notes_$(openssl rand -hex 16)"
+                  echo "notes<<${delimiter}" >> "$GITHUB_OUTPUT"
+                  node scripts/changelog.mjs body >> "$GITHUB_OUTPUT"
+                  echo "${delimiter}" >> "$GITHUB_OUTPUT"
 
             - name: Create Tauri release
               uses: tauri-apps/tauri-action@v1
@@ -68,9 +71,9 @@ jobs:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               with:
                   projectPath: apps/desktop
-                  tagName: app-v__VERSION__
-                  releaseName: "App v__VERSION__"
-                  releaseBody: "See the assets to download this version and install."
+                  tagName: v${{ steps.app-version.outputs.version }}
+                  releaseName: "k-virtual-monitor v${{ steps.app-version.outputs.version }}"
+                  releaseBody: ${{ steps.app-version.outputs.notes }}
                   releaseDraft: true
                   prerelease: false
                   args: ""

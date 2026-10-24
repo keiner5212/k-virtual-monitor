@@ -245,18 +245,18 @@ export class SessionClient {
 }
 
 /**
- * A client that keeps the session alive.
+ * Brings a live session back after the desktop drops.
  *
- * The desktop may go away at any moment: it sleeps, the router reboots, the
- * phone walks out of range. The client comes back on its own, with a delay
- * that grows up to a ceiling, so a desktop that is really gone is not
- * hammered with a connection attempt every second.
+ * A desktop that never answers is not retried. The screen tells the user to
+ * open the PC app instead of looping on the error.
  */
 export class ReconnectingClient {
     private client: SessionClient | null = null;
     private timer: ReturnType<typeof setTimeout> | null = null;
     private attempt = 0;
     private stopped = false;
+    /** True after one successful handshake. Failures before that do not retry. */
+    private live = false;
     private readonly frameBuffer = new LatestFrame();
 
     constructor(
@@ -291,12 +291,7 @@ export class ReconnectingClient {
         }
         const client = new SessionClient(
             {
-                onState: (state, detail) => {
-                    this.events.onState(state, detail);
-                    if (state === "closed" || state === "error") {
-                        this.scheduleRetry();
-                    }
-                },
+                onState: (state, detail) => this.note(state, detail),
                 onDisplayInfo: (info) => {
                     this.attempt = 0;
                     this.events.onDisplayInfo(info);
@@ -308,9 +303,36 @@ export class ReconnectingClient {
         try {
             await client.connect(this.options);
         } catch (cause) {
-            this.events.onState("error", cause instanceof Error ? cause.message : String(cause));
-            this.scheduleRetry();
+            if (!this.stopped) {
+                this.note("error", cause instanceof Error ? cause.message : String(cause));
+            }
         }
+    }
+
+    private note(state: ConnectionState, detail?: string): void {
+        if (this.stopped) {
+            return;
+        }
+        if (state === "connected") {
+            this.live = true;
+            this.attempt = 0;
+        }
+        this.events.onState(state, detail);
+        if (state === "error" || state === "closed") {
+            this.afterDrop();
+        }
+    }
+
+    /** A desktop that was never reached stays down. A live session may come back. */
+    private afterDrop(): void {
+        if (this.stopped || this.timer) {
+            return;
+        }
+        if (!this.live || this.attempt >= 4) {
+            this.events.onReconnectIn(null);
+            return;
+        }
+        this.scheduleRetry();
     }
 
     private scheduleRetry(): void {

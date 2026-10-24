@@ -12,11 +12,13 @@ import { ensureCsprng } from "./src/lib/random";
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, setHardwareDecoder, type AppSettings } from "./src/lib/settings";
 import type { Frame } from "./src/lib/frames";
 import { useSession } from "./src/lib/useSession";
+import HomeScreen from "./src/screens/HomeScreen";
 import PairScreen from "./src/screens/PairScreen";
 import SettingsScreen from "./src/screens/SettingsScreen";
 import { colors, radius, space, type } from "./src/ui";
 
 type Tab = "screen" | "settings";
+type Route = "home" | "pair" | "session";
 
 /** The system bars are drawn over the app, so every screen keeps clear of them. */
 const EDGES = ["top", "right", "bottom", "left"] as const;
@@ -30,6 +32,8 @@ export default function App() {
 }
 
 function Monitor() {
+    const [route, setRoute] = useState<Route>("home");
+    const [openId, setOpenId] = useState(0);
     const [tab, setTab] = useState<Tab>("screen");
     const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
     const [pairing, setPairing] = useState<StoredPairing | null>(null);
@@ -69,7 +73,14 @@ function Monitor() {
         });
     }, [pairing]);
 
-    const session = useSession({ pairing, settings, reloadToken, onDisplayInfo: applyDisplay });
+    const session = useSession({
+        pairing,
+        settings,
+        active: route === "session",
+        openId,
+        reloadToken,
+        onDisplayInfo: applyDisplay,
+    });
 
     useEffect(() => {
         if (session.state !== "connected" || !settings.keepAwake) {
@@ -100,20 +111,25 @@ function Monitor() {
     }, [pairing]);
 
     useEffect(() => {
-        if (!fullscreen) {
+        if (route === "home") {
             return;
         }
         const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
-            setFullscreen(false);
+            if (fullscreen) {
+                setFullscreen(false);
+                return true;
+            }
+            setRoute("home");
             return true;
         });
         return () => subscription.remove();
-    }, [fullscreen]);
+    }, [route, fullscreen]);
 
     const pair = useCallback(async (blob: string) => {
         setPairError(null);
         try {
             setPairing(await savePairing(blob));
+            setRoute("home");
         } catch (cause) {
             setPairError(cause instanceof Error ? cause.message : String(cause));
             throw cause;
@@ -138,6 +154,8 @@ function Monitor() {
     const unpair = useCallback(async () => {
         await clearPairing();
         setPairing(null);
+        setFullscreen(false);
+        setRoute("home");
     }, []);
 
     if (!ready) {
@@ -148,16 +166,42 @@ function Monitor() {
         );
     }
 
-    if (!pairing) {
+    if (route === "pair") {
         return (
             <SafeAreaView style={styles.root} edges={EDGES}>
                 <StatusBar style="light" />
-                <PairScreen onPair={pair} error={pairError} />
+                <PairScreen onPair={pair} onBack={() => setRoute("home")} error={pairError} />
+            </SafeAreaView>
+        );
+    }
+
+    if (route !== "session" || !pairing) {
+        return (
+            <SafeAreaView style={styles.root} edges={EDGES}>
+                <StatusBar style="light" />
+                <HomeScreen
+                    pairing={pairing}
+                    onOpen={() => {
+                        setTab("screen");
+                        setOpenId((id) => id + 1);
+                        setRoute("session");
+                    }}
+                    onAdd={() => {
+                        setPairError(null);
+                        setRoute("pair");
+                    }}
+                />
             </SafeAreaView>
         );
     }
 
     const connected = session.state === "connected";
+    const down =
+        (session.state === "error" || session.state === "closed") && session.reconnectingIn === null;
+    const leave = () => {
+        setFullscreen(false);
+        setRoute("home");
+    };
 
     return (
         <SafeAreaView style={styles.root} edges={fullscreen ? [] : EDGES}>
@@ -165,7 +209,12 @@ function Monitor() {
 
             {fullscreen ? null : (
                 <View style={styles.topBar}>
-                    <ConnectionPill state={session.state} name={pairing.serverName} />
+                    <View style={styles.leading}>
+                        <Pressable accessibilityRole="button" accessibilityLabel="Desktops" onPress={leave}>
+                            <Text style={styles.backLabel}>Desktops</Text>
+                        </Pressable>
+                        <ConnectionPill state={session.state} name={pairing.serverName} />
+                    </View>
                     <View style={styles.tabs}>
                         <TabButton label="Screen" active={tab === "screen"} onPress={() => setTab("screen")} />
                         <TabButton label="Settings" active={tab === "settings"} onPress={() => setTab("settings")} />
@@ -173,15 +222,9 @@ function Monitor() {
                 </View>
             )}
 
-            {!fullscreen && !connected && session.state !== "idle" ? (
+            {!fullscreen && session.reconnectingIn !== null ? (
                 <View style={styles.banner} accessibilityLiveRegion="polite">
-                    <Text style={styles.bannerText}>
-                        {session.state === "error"
-                            ? `Connection error: ${session.detail ?? "unknown"}`
-                            : session.reconnectingIn !== null
-                                ? `Reconnecting in ${session.reconnectingIn} s`
-                                : "Connecting..."}
-                    </Text>
+                    <Text style={styles.bannerText}>Reconnecting in {session.reconnectingIn} s</Text>
                 </View>
             ) : null}
 
@@ -189,6 +232,26 @@ function Monitor() {
                 <View style={styles.stage}>
                     {connected && session.frame ? (
                         <Picture frame={session.frame} onH264Failed={failH264} />
+                    ) : down ? (
+                        <View style={styles.stateBlock}>
+                            <Text style={type.title}>Open the app on the PC</Text>
+                            <Text style={[type.body, styles.stateDetail]}>
+                                k-virtual-monitor has to be running on {pairing.serverName} before this phone can connect.
+                            </Text>
+                            {session.detail ? (
+                                <Text style={[type.caption, styles.stateDetail]}>{session.detail}</Text>
+                            ) : null}
+                            <Pressable
+                                accessibilityRole="button"
+                                style={styles.action}
+                                onPress={() => setReloadToken((token) => token + 1)}
+                            >
+                                <Text style={styles.actionLabel}>Try again</Text>
+                            </Pressable>
+                            <Pressable accessibilityRole="button" style={styles.actionSecondary} onPress={leave}>
+                                <Text style={styles.backLabel}>Back</Text>
+                            </Pressable>
+                        </View>
                     ) : (
                         <View style={styles.stateBlock}>
                             <Text style={type.title}>{stateTitle(session.state)}</Text>
@@ -214,7 +277,7 @@ function Monitor() {
                         </View>
                     ) : null}
 
-                    {fullscreen ? null : (
+                    {fullscreen || down || !session.frame ? null : (
                         <Pressable
                             accessibilityRole="button"
                             accessibilityLabel="Full screen"
@@ -241,9 +304,9 @@ function Monitor() {
 }
 
 function ConnectionPill({ state, name }: { state: string; name: string }) {
-    const tone = state === "connected" ? colors.ok : state === "error" ? colors.danger : colors.warn;
-    const label =
-        state === "connected" ? "Connected" : state === "error" ? "Error" : "Connecting";
+    const offline = state === "error" || state === "closed";
+    const tone = state === "connected" ? colors.ok : offline ? colors.danger : colors.warn;
+    const label = state === "connected" ? "Connected" : offline ? "Offline" : "Connecting";
     return (
         <View
             style={styles.pill}
@@ -324,18 +387,7 @@ function streamCodec(wireValue: number): string {
 }
 
 function stateTitle(state: string): string {
-    switch (state) {
-        case "connecting":
-            return "Connecting";
-        case "connected":
-            return "Waiting for the first frame";
-        case "error":
-            return "Connection error";
-        case "closed":
-            return "Disconnected";
-        default:
-            return "Idle";
-    }
+    return state === "connected" ? "Waiting for the first frame" : "Connecting";
 }
 
 function toBase64(bytes: Uint8Array): string {
@@ -359,6 +411,32 @@ const styles = StyleSheet.create({
         paddingHorizontal: space[4],
         borderBottomWidth: 1,
         borderBottomColor: colors.border,
+    },
+    leading: {
+        flexDirection: "row",
+        alignItems: "center",
+        gap: space[3],
+        flexShrink: 1,
+    },
+    backLabel: {
+        color: colors.ink,
+        fontSize: 13,
+        fontWeight: "600",
+    },
+    action: {
+        marginTop: space[3],
+        backgroundColor: colors.accent,
+        borderRadius: radius.control,
+        paddingVertical: space[3],
+        paddingHorizontal: space[5],
+    },
+    actionLabel: {
+        color: colors.surface,
+        fontSize: 15,
+        fontWeight: "600",
+    },
+    actionSecondary: {
+        paddingVertical: space[2],
     },
     pill: {
         flexDirection: "row",

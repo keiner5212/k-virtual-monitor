@@ -8,14 +8,13 @@
  */
 
 import { CameraView, useCameraPermissions } from "expo-camera";
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
     Pressable,
     ScrollView,
     StyleSheet,
     Text,
     TextInput,
-    useWindowDimensions,
     View,
 } from "react-native";
 
@@ -25,21 +24,21 @@ import { colors, radius, space, type } from "../ui";
 
 interface PairScreenProps {
     onPair: (blob: string) => Promise<void>;
+    onBack: () => void;
     error: string | null;
 }
 
-export default function PairScreen({ onPair, error }: PairScreenProps) {
+export default function PairScreen({ onPair, onBack, error }: PairScreenProps) {
     const [permission, requestPermission] = useCameraPermissions();
     const [manual, setManual] = useState("");
     const [busy, setBusy] = useState(false);
+    const [scanning, setScanning] = useState(false);
     const [safety, setSafety] = useState<string | null>(null);
     const [pending, setPending] = useState<string | null>(null);
     const [localError, setLocalError] = useState<string | null>(null);
     const lock = useRef(false);
-    const { height } = useWindowDimensions();
-    const barcodeSettings = useMemo(() => ({ barcodeTypes: ["qr" as const] }), []);
 
-    const stage = (blob: string) => {
+    const stage = useCallback((blob: string) => {
         const trimmed = blob.trim();
         try {
             setSafety(formatSafetyCode(pairingSafetyCode(decodePairingBlob(trimmed))));
@@ -50,6 +49,43 @@ export default function PairScreen({ onPair, error }: PairScreenProps) {
             setSafety(null);
             setPending(null);
             setLocalError("That is not a pairing code. Point the camera at the code on the desktop.");
+        }
+    }, []);
+
+    useEffect(() => {
+        const subscription = CameraView.onModernBarcodeScanned((result) => {
+            const payload = `${result.raw ?? result.data ?? ""}`.trim();
+            if (!payload || lock.current) {
+                return;
+            }
+            lock.current = true;
+            stage(payload);
+        });
+        return () => subscription.remove();
+    }, [stage]);
+
+    const scan = async () => {
+        if (!CameraView.isModernBarcodeScannerAvailable) {
+            setLocalError("This phone has no code scanner. Paste the code instead.");
+            return;
+        }
+        const current = permission?.granted ? permission : await requestPermission();
+        if (!current.granted) {
+            setLocalError("The camera is needed to scan. Paste the code instead.");
+            return;
+        }
+        lock.current = false;
+        setScanning(true);
+        setLocalError(null);
+        try {
+            await CameraView.launchScanner({ barcodeTypes: ["qr"] });
+        } catch (cause) {
+            const message = cause instanceof Error ? cause.message : String(cause);
+            if (!message.toLowerCase().includes("cancel")) {
+                setLocalError("The scanner could not open. Paste the code instead.");
+            }
+        } finally {
+            setScanning(false);
         }
     };
 
@@ -73,28 +109,6 @@ export default function PairScreen({ onPair, error }: PairScreenProps) {
         setPending(null);
         setLocalError(null);
     };
-
-    if (!permission) {
-        return <View style={styles.scroll} />;
-    }
-
-    if (!permission.granted) {
-        return (
-            <View style={[styles.root, styles.scroll]}>
-                <Text style={type.title}>Pair a desktop</Text>
-                <Text style={[type.body, styles.explanation]}>
-                    The camera reads the pairing code of the desktop. The code never leaves the local network.
-                </Text>
-                <Pressable
-                    accessibilityRole="button"
-                    style={styles.primary}
-                    onPress={() => void requestPermission()}
-                >
-                    <Text style={styles.primaryLabel}>Allow the camera</Text>
-                </Pressable>
-            </View>
-        );
-    }
 
     if (safety && pending) {
         return (
@@ -125,6 +139,9 @@ export default function PairScreen({ onPair, error }: PairScreenProps) {
                 <Pressable accessibilityRole="button" style={styles.secondary} onPress={scanAgain}>
                     <Text style={styles.secondaryLabel}>Scan again</Text>
                 </Pressable>
+                <Pressable accessibilityRole="button" style={styles.secondary} onPress={onBack}>
+                    <Text style={styles.secondaryLabel}>Back</Text>
+                </Pressable>
                 {error ? (
                     <Text accessibilityLiveRegion="assertive" style={styles.error}>
                         {error}
@@ -137,27 +154,21 @@ export default function PairScreen({ onPair, error }: PairScreenProps) {
     return (
         <View style={styles.screen}>
             <Text style={type.title}>Pair a desktop</Text>
-            <View style={[styles.scannerBox, { height: cameraHeight(height) }]}>
-                <CameraView
-                    style={styles.camera}
-                    facing="back"
-                    autofocus="on"
-                    barcodeScannerSettings={barcodeSettings}
-                    onBarcodeScanned={(result) => {
-                        if (lock.current) {
-                            return;
-                        }
-                        const data = result.data?.trim();
-                        if (!data) {
-                            return;
-                        }
-                        lock.current = true;
-                        stage(data);
-                    }}
-                />
-                <View pointerEvents="none" style={styles.reticle} />
-            </View>
-            <Text style={[type.caption, styles.hint]}>Point the camera at the QR code on the desktop</Text>
+            <Text style={[type.body, styles.explanation]}>
+                The scanner reads the code shown on the PC. The code never leaves the local network.
+            </Text>
+            <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ disabled: scanning }}
+                style={[styles.primary, scanning && styles.primaryDisabled]}
+                onPress={() => void scan()}
+                disabled={scanning}
+            >
+                <Text style={styles.primaryLabel}>{scanning ? "Scanning..." : "Scan the code"}</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" style={styles.secondary} onPress={onBack}>
+                <Text style={styles.secondaryLabel}>Back</Text>
+            </Pressable>
             <ScrollView
                 style={styles.scroll}
                 contentContainerStyle={styles.manual}
@@ -197,11 +208,6 @@ export default function PairScreen({ onPair, error }: PairScreenProps) {
     );
 }
 
-/** The scanner takes the room the screen has, without eating the rest. */
-function cameraHeight(height: number): number {
-    return Math.round(Math.min(420, Math.max(220, height * 0.46)));
-}
-
 const styles = StyleSheet.create({
     scroll: {
         flex: 1,
@@ -221,31 +227,6 @@ const styles = StyleSheet.create({
     },
     explanation: {
         color: colors.muted,
-    },
-    scannerBox: {
-        borderRadius: radius.panel,
-        borderWidth: 1,
-        borderColor: colors.borderStrong,
-        overflow: "hidden",
-        backgroundColor: colors.raised,
-    },
-    camera: {
-        flex: 1,
-    },
-    reticle: {
-        position: "absolute",
-        top: "50%",
-        left: "50%",
-        width: 200,
-        height: 200,
-        marginLeft: -100,
-        marginTop: -100,
-        borderWidth: 2,
-        borderColor: colors.accent,
-        borderRadius: 12,
-    },
-    hint: {
-        textAlign: "center",
     },
     label: {
         marginTop: space[2],

@@ -11,6 +11,7 @@ import android.view.TextureView
 import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import expo.modules.kotlin.viewevent.EventDispatcher
 import expo.modules.kotlin.views.ExpoView
 import java.nio.ByteBuffer
 
@@ -35,6 +36,7 @@ class KvmVideoView(context: Context, appContext: AppContext) :
     ExpoView(context, appContext),
     TextureView.SurfaceTextureListener {
 
+    private val onDecodeError by EventDispatcher<Map<String, String>>()
     private val texture = TextureView(context)
     private val lock = Any()
     private var surface: Surface? = null
@@ -174,7 +176,8 @@ class KvmVideoView(context: Context, appContext: AppContext) :
             return
         }
         reported = true
-        post { sendEvent("onDecodeError", mapOf("message" to message)) }
+        val payload = mapOf("message" to message)
+        post { onDecodeError(payload) }
     }
 
     private fun nal(bytes: ByteArray, kind: Int): ByteArray? {

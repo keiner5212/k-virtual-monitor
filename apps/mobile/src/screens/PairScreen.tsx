@@ -7,8 +7,8 @@
  * they paired with the right desktop.
  */
 
-import { CameraView, useCameraPermissions } from "expo-camera";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { CameraView, useCameraPermissions, type BarcodeScanningResult } from "expo-camera";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
     Pressable,
     ScrollView,
@@ -32,11 +32,13 @@ export default function PairScreen({ onPair, onBack, error }: PairScreenProps) {
     const [permission, requestPermission] = useCameraPermissions();
     const [manual, setManual] = useState("");
     const [busy, setBusy] = useState(false);
-    const [scanning, setScanning] = useState(false);
+    const [cameraOn, setCameraOn] = useState(false);
+    const [torch, setTorch] = useState(false);
     const [safety, setSafety] = useState<string | null>(null);
     const [pending, setPending] = useState<string | null>(null);
     const [localError, setLocalError] = useState<string | null>(null);
     const lock = useRef(false);
+    const barcodeSettings = useMemo(() => ({ barcodeTypes: ["qr" as const] }), []);
 
     const stage = useCallback((blob: string) => {
         const trimmed = blob.trim();
@@ -52,41 +54,25 @@ export default function PairScreen({ onPair, onBack, error }: PairScreenProps) {
         }
     }, []);
 
-    useEffect(() => {
-        const subscription = CameraView.onModernBarcodeScanned((result) => {
-            const payload = `${result.raw ?? result.data ?? ""}`.trim();
-            if (!payload || lock.current) {
-                return;
-            }
-            lock.current = true;
-            stage(payload);
-        });
-        return () => subscription.remove();
+    const onBarcodeScanned = useCallback((result: BarcodeScanningResult) => {
+        const payload = `${result.raw || result.data || ""}`.trim();
+        if (!payload || payload === "null" || lock.current) {
+            return;
+        }
+        lock.current = true;
+        setCameraOn(false);
+        stage(payload);
     }, [stage]);
 
     const scan = async () => {
-        if (!CameraView.isModernBarcodeScannerAvailable) {
-            setLocalError("This phone has no code scanner. Paste the code instead.");
-            return;
-        }
         const current = permission?.granted ? permission : await requestPermission();
         if (!current.granted) {
             setLocalError("The camera is needed to scan. Paste the code instead.");
             return;
         }
         lock.current = false;
-        setScanning(true);
         setLocalError(null);
-        try {
-            await CameraView.launchScanner({ barcodeTypes: ["qr"] });
-        } catch (cause) {
-            const message = cause instanceof Error ? cause.message : String(cause);
-            if (!message.toLowerCase().includes("cancel")) {
-                setLocalError("The scanner could not open. Paste the code instead.");
-            }
-        } finally {
-            setScanning(false);
-        }
+        setCameraOn(true);
     };
 
     const confirm = async () => {
@@ -109,6 +95,35 @@ export default function PairScreen({ onPair, onBack, error }: PairScreenProps) {
         setPending(null);
         setLocalError(null);
     };
+
+    if (cameraOn) {
+        return (
+            <View style={styles.scanner}>
+                <CameraView
+                    style={styles.camera}
+                    facing="back"
+                    mode="picture"
+                    enableTorch={torch}
+                    barcodeScannerSettings={barcodeSettings}
+                    onBarcodeScanned={onBarcodeScanned}
+                    onMountError={(event) => {
+                        setCameraOn(false);
+                        setLocalError(event.message || "The camera could not open.");
+                    }}
+                />
+                <View style={styles.scannerShade} pointerEvents="none" />
+                <Text style={styles.scannerHint}>Fill the frame with the code on the desktop</Text>
+                <View style={styles.scannerBar}>
+                    <Pressable accessibilityRole="button" style={[styles.secondary, styles.scannerButton]} onPress={() => setTorch((on) => !on)}>
+                        <Text style={styles.secondaryLabel}>{torch ? "Light off" : "Light"}</Text>
+                    </Pressable>
+                    <Pressable accessibilityRole="button" style={[styles.secondary, styles.scannerButton]} onPress={() => setCameraOn(false)}>
+                        <Text style={styles.secondaryLabel}>Close</Text>
+                    </Pressable>
+                </View>
+            </View>
+        );
+    }
 
     if (safety && pending) {
         return (
@@ -159,12 +174,10 @@ export default function PairScreen({ onPair, onBack, error }: PairScreenProps) {
             </Text>
             <Pressable
                 accessibilityRole="button"
-                accessibilityState={{ disabled: scanning }}
-                style={[styles.primary, scanning && styles.primaryDisabled]}
+                style={styles.primary}
                 onPress={() => void scan()}
-                disabled={scanning}
             >
-                <Text style={styles.primaryLabel}>{scanning ? "Scanning..." : "Scan the code"}</Text>
+                <Text style={styles.primaryLabel}>Scan the code</Text>
             </Pressable>
             <Pressable accessibilityRole="button" style={styles.secondary} onPress={onBack}>
                 <Text style={styles.secondaryLabel}>Back</Text>
@@ -216,6 +229,45 @@ const styles = StyleSheet.create({
         flex: 1,
         padding: space[4],
         gap: space[3],
+    },
+    scanner: {
+        flex: 1,
+        backgroundColor: "#000",
+    },
+    camera: {
+        flex: 1,
+    },
+    scannerShade: {
+        position: "absolute",
+        top: "18%",
+        left: "12%",
+        right: "12%",
+        bottom: "28%",
+        borderWidth: 2,
+        borderColor: colors.accent,
+        borderRadius: 12,
+    },
+    scannerHint: {
+        position: "absolute",
+        left: space[4],
+        right: space[4],
+        bottom: 88,
+        textAlign: "center",
+        color: colors.ink,
+        fontSize: 14,
+        lineHeight: 20,
+    },
+    scannerBar: {
+        position: "absolute",
+        left: space[4],
+        right: space[4],
+        bottom: space[4],
+        flexDirection: "row",
+        gap: space[3],
+    },
+    scannerButton: {
+        flex: 1,
+        backgroundColor: colors.raised,
     },
     manual: {
         gap: space[3],

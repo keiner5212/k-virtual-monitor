@@ -1,0 +1,47 @@
+diff --git a/android/src/main/java/expo/modules/camera/CameraViewModule.kt b/android/src/main/java/expo/modules/camera/CameraViewModule.kt
+index 62a1808a102174538f45599dc7e246d60e28d453..3cf07dbcd13848941e0aba32d70e747cc5d8ca35 100755
+--- a/android/src/main/java/expo/modules/camera/CameraViewModule.kt
++++ b/android/src/main/java/expo/modules/camera/CameraViewModule.kt
+@@ -194,7 +194,12 @@ class CameraViewModule : Module() {
+           }
+         }.build()
+ 
+-        val scanner = GmsBarcodeScanning.getClient(reactContext, options)
++        val activity = appContext.currentActivity
++        if (activity == null) {
++          promise.reject(Exceptions.MissingActivity())
++          return@AsyncFunction
++        }
++        val scanner = GmsBarcodeScanning.getClient(activity, options)
+         scanner.startScan()
+           .addOnSuccessListener { barcode ->
+             val result = BarCodeScannerResultSerializer.parseBarcodeScanningResult(barcode)
+diff --git a/android/src/main/java/expo/modules/camera/ExpoCameraView.kt b/android/src/main/java/expo/modules/camera/ExpoCameraView.kt
+index a676d64e853b96fc838ea27165cf265929df91a1..0adc55a85cd070ab2b7869950d7a84bf96309146 100755
+--- a/android/src/main/java/expo/modules/camera/ExpoCameraView.kt
++++ b/android/src/main/java/expo/modules/camera/ExpoCameraView.kt
+@@ -727,6 +727,13 @@ class ExpoCameraView(
+ 
+   fun setBarcodeScannerSettings(settings: BarcodeSettings?) {
+     barcodeFormats = settings?.barcodeTypes ?: emptyList()
++    // The analyzer copies formats when the camera is created, so a later change must rebuild it.
++    if (shouldScanBarcodes) {
++      shouldCreateCamera = true
++      scope.launch {
++        createCamera()
++      }
++    }
+   }
+ 
+   private fun transformBarcodeScannerResultToViewCoordinates(barcode: BarCodeScannerResult) {
+@@ -842,8 +850,8 @@ class ExpoCameraView(
+       onBarcodeScanned(
+         BarcodeScannedEvent(
+           target = id,
+-          data = barcode.value.toString(),
+-          raw = barcode.raw.toString(),
++          data = barcode.value ?: barcode.raw ?: "",
++          raw = barcode.raw ?: barcode.value ?: "",
+           type = BarcodeType.mapFormatToString(barcode.type),
+           cornerPoints = cornerPoints,
+           bounds = boundingBox,

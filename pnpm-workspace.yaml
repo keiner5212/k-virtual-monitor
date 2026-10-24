@@ -1,11 +1,11 @@
 packages:
-    - "apps/*"
-    - "packages/*"
-    - "packages/*/*"
+  - "apps/*"
+  - "packages/*"
+  - "packages/*/*"
 
 allowBuilds:
-    esbuild: true
-    unrs-resolver: true
+  esbuild: true
+  unrs-resolver: true
 
 # React Native and Metro expect a flat node_modules, the way npm builds it.
 # The default pnpm layout hides the transitive dependencies of the packages and
@@ -17,6 +17,9 @@ nodeLinker: hoisted
 # for one of them. They are not part of the shipped application. Review on
 # 2027-01-01. See docs/security.md.
 auditConfig:
-    ignoreGhsas:
-        - GHSA-86w9-cpqp-85rv
-        - GHSA-mrhx-c7xc-m3w5
+  ignoreGhsas:
+    - GHSA-86w9-cpqp-85rv
+    - GHSA-mrhx-c7xc-m3w5
+
+patchedDependencies:
+  expo-camera@58.0.12: patches/expo-camera@58.0.12.patch

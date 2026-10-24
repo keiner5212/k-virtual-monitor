@@ -1,7 +1,8 @@
 //! The virtual screen.
 //!
-//! KWin creates an extra monitor only for a portal screencast of type virtual,
-//! and the user has to accept that dialog. The stream comes back as a PipeWire
+//! A RemoteDesktop session with a ScreenCast source of type virtual makes KWin
+//! add a new monitor. It does not mirror an existing one. The first allow
+//! prompt is the remote-control prompt. The stream comes back as a PipeWire
 //! node. The development headers are not installed, so the library is loaded
 //! by name and the structs below follow the PipeWire 1.0-1.6 ABI.
 
@@ -82,7 +83,7 @@ impl VirtualSource {
             frame: Mutex::new(None),
             cv: Condvar::new(),
             stop: AtomicBool::new(false),
-            status: Mutex::new("Accept the share dialog to add the virtual screen".to_string()),
+            status: Mutex::new("Accept the prompt. It adds a new screen.".to_string()),
             loop_ptr: AtomicPtr::new(std::ptr::null_mut()),
             quit: Mutex::new(None),
             thread: Mutex::new(None),
@@ -234,7 +235,7 @@ impl Inner {
     }
 
     fn capture(self: &Arc<Self>) -> Result<(), String> {
-        self.set_status("Accept the share dialog to add the virtual screen");
+        self.set_status("Accept the prompt. It adds a new screen.");
         let before = list_outputs();
         let connection = Connection::session().map_err(|error| error.to_string())?;
         let opened = open_virtual_stream(&connection)?;
@@ -260,22 +261,32 @@ struct OpenedStream {
 }
 
 fn open_virtual_stream(connection: &Connection) -> Result<OpenedStream, String> {
+    let remote = RemoteDesktopProxyBlocking::new(connection).map_err(|error| error.to_string())?;
     let screencast = ScreenCastProxyBlocking::new(connection).map_err(|error| error.to_string())?;
     let handle = token();
     let session_token = token();
     let mut create = HashMap::new();
     create.insert("handle_token", Value::from(handle.as_str()));
     create.insert("session_handle_token", Value::from(session_token.as_str()));
-    let created = portal_request(connection, &handle, || screencast.create_session(create))?;
+    let created = portal_request(connection, &handle, || remote.create_session(create))?;
     let session = object_path(created.get("session_handle"))?;
+
+    let devices_token = token();
+    let mut devices = HashMap::new();
+    devices.insert("handle_token", Value::from(devices_token.as_str()));
+    // 1 keyboard, 2 pointer, 4 touch. A session with none is rejected.
+    devices.insert("types", Value::from(7u32));
+    devices.insert("persist_mode", Value::from(0u32));
+    portal_request(connection, &devices_token, || {
+        remote.select_devices(&session, devices)
+    })?;
 
     let select_token = token();
     let mut select = HashMap::new();
     select.insert("handle_token", Value::from(select_token.as_str()));
-    // 4 is a new virtual monitor. 2 embeds the pointer in the picture.
+    // 4 is a new virtual monitor, not the existing desktop. 2 embeds the pointer.
     select.insert("types", Value::from(4u32));
     select.insert("cursor_mode", Value::from(2u32));
-    select.insert("persist_mode", Value::from(0u32));
     select.insert("multiple", Value::from(false));
     portal_request(connection, &select_token, || {
         screencast.select_sources(&session, select)
@@ -284,10 +295,9 @@ fn open_virtual_stream(connection: &Connection) -> Result<OpenedStream, String> 
     let start_token = token();
     let mut start = HashMap::new();
     start.insert("handle_token", Value::from(start_token.as_str()));
-    let started = portal_request(connection, &start_token, || {
-        screencast.start(&session, "", start)
-    })?;
-    let node = first_node(&started)?;
+    // RemoteDesktop.Start with type 4 adds a monitor. ScreenCast.Start opens the share picker.
+    let started = portal_request(connection, &start_token, || remote.start(&session, "", start))?;
+    let node = virtual_node(&started)?;
     let fd = screencast
         .open_pipe_wire_remote(&session, HashMap::new())
         .map_err(|error| error.to_string())?;
@@ -337,16 +347,30 @@ fn object_path(value: Option<&OwnedValue>) -> Result<OwnedObjectPath, String> {
     OwnedObjectPath::try_from(text).map_err(|error| error.to_string())
 }
 
-fn first_node(results: &HashMap<String, OwnedValue>) -> Result<u32, String> {
+fn virtual_node(results: &HashMap<String, OwnedValue>) -> Result<u32, String> {
     let value = results
         .get("streams")
         .ok_or_else(|| format!("the portal did not return a stream: {results:?}"))?;
     let streams = Vec::<(u32, HashMap<String, OwnedValue>)>::try_from(value.clone())
         .map_err(|error| format!("cannot read the portal stream: {error}"))?;
-    streams
+    let (node, meta) = streams
         .first()
-        .map(|(node, _)| *node)
-        .ok_or_else(|| "the portal returned no stream".to_string())
+        .ok_or_else(|| "the portal returned no stream".to_string())?;
+    // 1 is a real monitor, 2 a window, 4 the new virtual screen.
+    match meta.get("source_type").and_then(as_u32) {
+        Some(4) | None => Ok(*node),
+        Some(kind) => Err(format!(
+            "the portal shared an existing screen ({kind}). Accept the dialog that creates a new virtual screen."
+        )),
+    }
+}
+
+fn as_u32(value: &OwnedValue) -> Option<u32> {
+    u32::try_from(value.clone()).ok().or_else(|| {
+        i32::try_from(value.clone())
+            .ok()
+            .and_then(|number| u32::try_from(number).ok())
+    })
 }
 
 fn token() -> String {
@@ -479,6 +503,28 @@ trait ScreenCast {
         session_handle: &ObjectPath<'_>,
         options: HashMap<&str, Value<'_>>,
     ) -> zbus::Result<zbus::zvariant::OwnedFd>;
+}
+
+#[proxy(
+    interface = "org.freedesktop.portal.RemoteDesktop",
+    default_service = "org.freedesktop.portal.Desktop",
+    default_path = "/org/freedesktop/portal/desktop"
+)]
+trait RemoteDesktop {
+    fn create_session(&self, options: HashMap<&str, Value<'_>>) -> zbus::Result<OwnedObjectPath>;
+
+    fn select_devices(
+        &self,
+        session_handle: &ObjectPath<'_>,
+        options: HashMap<&str, Value<'_>>,
+    ) -> zbus::Result<OwnedObjectPath>;
+
+    fn start(
+        &self,
+        session_handle: &ObjectPath<'_>,
+        parent_window: &str,
+        options: HashMap<&str, Value<'_>>,
+    ) -> zbus::Result<OwnedObjectPath>;
 }
 
 #[proxy(
@@ -1220,6 +1266,40 @@ mod tests {
         let (format, width, height) = parse_video(&format_pod()).expect("a video format");
         assert_eq!(format, SPA_VIDEO_BGRX);
         assert_eq!((width, height), (1920, 1080));
+    }
+
+    #[test]
+    fn the_portal_asks_for_a_virtual_screen() {
+        use zbus::zvariant::serialized::Context;
+        use zbus::zvariant::{to_bytes, Endian};
+
+        let mut options = HashMap::new();
+        options.insert("types", Value::from(4u32));
+        let encoded = to_bytes(Context::new_dbus(Endian::Little, 0), &options).expect("encode");
+        let (decoded, _): (HashMap<String, Value>, _) = encoded.deserialize().expect("decode");
+        let types = decoded.get("types").expect("types");
+        // KDE does options.value("types").toUInt() and treats 0 as "share the real monitor".
+        // A nested variant would decode as signature "v" and that call returns 0.
+        assert_eq!(types.value_signature().to_string(), "u");
+        assert_eq!(u32::try_from(types.clone()).unwrap(), 4);
+
+        let session = ObjectPath::try_from("/org/freedesktop/portal/desktop/session/probe").unwrap();
+        let message = zbus::message::Message::method_call(
+            "/org/freedesktop/portal/desktop",
+            "SelectSources",
+        )
+        .unwrap()
+        .destination("org.freedesktop.portal.Desktop")
+        .unwrap()
+        .interface("org.freedesktop.portal.ScreenCast")
+        .unwrap()
+        .build(&(session, &options))
+        .unwrap();
+        let (_path, sent): (OwnedObjectPath, HashMap<String, OwnedValue>) =
+            message.body().deserialize().unwrap();
+        let sent_types = sent.get("types").expect("types");
+        assert_eq!(sent_types.value_signature().to_string(), "u");
+        assert_eq!(u32::try_from(sent_types.clone()).unwrap(), 4);
     }
 
     #[test]

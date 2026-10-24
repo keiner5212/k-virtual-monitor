@@ -271,7 +271,7 @@ impl Server {
     /// phone that is already known and the secret of the pairing code that is
     /// waiting for a phone.
     fn psk_candidates(&self, hello: &Hello) -> Vec<Psk> {
-        let mut store = self.store.lock().expect("device store is not poisoned");
+        let mut store = crate::devices::lock_store(&self.store);
         // The store file is the source of truth: a code created by the
         // command line while the app was running has to be accepted.
         if let Err(error) = store.reload(&self.store_path) {
@@ -299,10 +299,16 @@ impl Server {
     /// The phone owns its id and sends it in the greeting, so the entry takes
     /// that id. The secret it proved decides which entry it is, so a phone
     /// that pairs again lands in the same place instead of a new one.
+    ///
+    /// The model is the name the user sees, so it is also what tells the
+    /// phones of a person apart. A phone that comes back with another id,
+    /// for example after the app was installed again, takes the place of the
+    /// entry of its model instead of leaving a copy of itself behind.
     fn adopt_device(&self, hello: &Hello, psk: &Psk) -> Option<DeviceEntry> {
-        let mut store = self.store.lock().expect("device store is not poisoned");
+        let mut store = crate::devices::lock_store(&self.store);
         let psk_text = hex(psk.as_bytes());
         let id = hex(&hello.device_id);
+        let model = hello.device_name.clone();
         let mut updated = match store.find_by_psk(&psk_text).cloned() {
             Some(entry) => {
                 if entry.revoked {
@@ -313,7 +319,7 @@ impl Server {
             }
             None => DeviceEntry {
                 id: id.clone(),
-                name: hello.device_name.clone(),
+                name: model.clone(),
                 psk: psk_text.clone(),
                 caps: CAP_VIEW | CAP_CONTROL,
                 paired: false,
@@ -327,12 +333,34 @@ impl Server {
             },
         };
         let old_id = updated.id.clone();
-        updated.id = id;
-        updated.name = hello.device_name.clone();
+        updated.id = id.clone();
+        updated.name = model.clone();
         updated.paired = true;
         // The phone only gets what it asked for, never more.
         updated.caps &= hello.caps_requested;
-        // The entry of a phone is the only one: the old id is dropped.
+        // The entry of the model is the entry of this phone. The old one goes
+        // away, so the list of the paired devices does not fill with copies
+        // of the same phone.
+        let previous = store
+            .find_by_model(&model)
+            .filter(|entry| entry.id != id && !self.is_connected(&entry.id))
+            .cloned();
+        if let Some(previous) = previous {
+            // The size the user picked for this phone is kept.
+            if previous.width != 0 {
+                updated.width = previous.width;
+            }
+            if previous.height != 0 {
+                updated.height = previous.height;
+            }
+            if previous.fps != 0 {
+                updated.fps = previous.fps;
+            }
+            if previous.jpeg_quality != 0 {
+                updated.jpeg_quality = previous.jpeg_quality;
+            }
+            store.remove(&previous.id);
+        }
         store.remove(&old_id);
         store.upsert(updated.clone());
         if let Err(error) = store.save(&self.store_path) {

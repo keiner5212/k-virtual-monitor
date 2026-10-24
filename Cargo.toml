@@ -12,7 +12,8 @@ license = "MIT"
 kvm-protocol = { path = "packages/protocol/rust" }
 
 [profile.release]
-panic = "abort"
+# A panic must not take the server down: the phones have to be able to
+# connect again. The thread that panicked dies, the others keep working.
 codegen-units = 1
 lto = true
 opt-level = "s"

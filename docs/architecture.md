@@ -27,8 +27,14 @@ together: a change in one that is not mirrored in the other fails the tests.
   Tauri app is a thin shell around it, and `--headless` runs the server
   without a webview.
 - The capture is a `FrameSource`. The server does not know how the picture
-  is produced. Today the source is a synthetic test pattern; the XDG portal
-  capture replaces it without touching the protocol or the session logic.
+  is produced. On a Wayland desktop the source is a virtual screen the XDG
+  portal creates, and the synthetic test pattern is the fallback for the
+  tests and the headless runs.
+- The virtual screen is found by name. The output ids of `kscreen-doctor`
+  change when the layout changes, so the screen of the user is never the one
+  that gets resized.
+- The portal permission is kept in `~/.local/state/kvm/portal.json`, so the
+  consent dialog only appears the first time.
 - The input path is the mirror image: the server parses the input messages
   and hands them to an injector. Today the injector only logs.
 
@@ -74,7 +80,7 @@ size. With a hardware decoder the limit moves to the network.
 2. Desktop server: handshake, frame window, synthetic source. Done.
 3. Desktop app: status screen, pairing, settings, window buttons. Done.
 4. Phone app: pairing by QR code, session, frame display, settings. Done.
-5. Desktop server: XDG portal capture and input injection.
+5. Desktop server: XDG portal capture. Done. Input injection is next.
 6. Phone: touch, mouse and keyboard input.
 7. Codecs: H.264 with hardware encode and decode, JPEG as the fallback.
 8. Packaging: the desktop bundle and the APK.
@@ -84,7 +90,6 @@ size. With a hardware decoder the limit moves to the network.
 - The client renders frames as base64 data URIs. That copies every frame
   twice and will not hold 30 fps. The next step is a native view that takes
   the bytes without the round trip through the bridge.
-- The synthetic source is a placeholder for the real capture.
 - The input messages are parsed and the capability is enforced, but the
   events are not injected into the desktop yet.
 - There is no discovery. The address comes from the pairing code.

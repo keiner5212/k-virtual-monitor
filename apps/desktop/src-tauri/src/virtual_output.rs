@@ -10,6 +10,7 @@ use rand::RngCore;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::fd::IntoRawFd;
+use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -49,6 +50,32 @@ const MAP_SHARED: i32 = 1;
 struct ScreenOutput {
     id: i64,
     name: String,
+}
+
+/// The permission the portal gave us. It is the way back in without a
+/// prompt, so it is kept with owner only permissions.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct PortalPermission {
+    restore_token: Option<String>,
+}
+
+impl PortalPermission {
+    fn load(path: &Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, path: &Path) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let Ok(text) = serde_json::to_string_pretty(self) else {
+            return;
+        };
+        let _ = crate::devices::write_private(path, text.as_bytes());
+    }
 }
 
 struct Inner {
@@ -238,8 +265,16 @@ impl Inner {
         self.set_status("Accept the prompt. It adds a new screen.");
         let before = list_outputs();
         let connection = Connection::session().map_err(|error| error.to_string())?;
-        let opened = open_virtual_stream(&connection)?;
-        let output = wait_for_output(&before);
+        let permission_path = crate::config::portal_permission_path();
+        let permission = PortalPermission::load(&permission_path);
+        let opened = open_virtual_stream(&connection, permission.restore_token.as_deref())?;
+        if let Some(token) = &opened.restore_token {
+            PortalPermission {
+                restore_token: Some(token.clone()),
+            }
+            .save(&permission_path);
+        }
+        let output = find_output(opened.output_name.as_deref(), &before);
         if let Some(output) = &output {
             let mode = *self.mode.lock().expect("stream mode is not poisoned");
             resize_output(output, mode);
@@ -258,9 +293,16 @@ impl Inner {
 struct OpenedStream {
     fd: std::os::fd::OwnedFd,
     node: u32,
+    /// The name of the output the portal created, when the portal tells it.
+    output_name: Option<String>,
+    /// The permission the portal gave us, so the next run does not ask again.
+    restore_token: Option<String>,
 }
 
-fn open_virtual_stream(connection: &Connection) -> Result<OpenedStream, String> {
+fn open_virtual_stream(
+    connection: &Connection,
+    restore_token: Option<&str>,
+) -> Result<OpenedStream, String> {
     let remote = RemoteDesktopProxyBlocking::new(connection).map_err(|error| error.to_string())?;
     let screencast = ScreenCastProxyBlocking::new(connection).map_err(|error| error.to_string())?;
     let handle = token();
@@ -276,7 +318,12 @@ fn open_virtual_stream(connection: &Connection) -> Result<OpenedStream, String> 
     devices.insert("handle_token", Value::from(devices_token.as_str()));
     // 1 keyboard, 2 pointer, 4 touch. A session with none is rejected.
     devices.insert("types", Value::from(7u32));
-    devices.insert("persist_mode", Value::from(0u32));
+    // 2 keeps the permission until the user revokes it, so the next run starts
+    // without a prompt. The token is the way back in.
+    devices.insert("persist_mode", Value::from(2u32));
+    if let Some(token) = restore_token {
+        devices.insert("restore_token", Value::from(token));
+    }
     portal_request(connection, &devices_token, || {
         remote.select_devices(&session, devices)
     })?;
@@ -299,13 +346,16 @@ fn open_virtual_stream(connection: &Connection) -> Result<OpenedStream, String> 
     let started = portal_request(connection, &start_token, || {
         remote.start(&session, "", start)
     })?;
-    let node = virtual_node(&started)?;
+    let (node, output_name) = virtual_node(&started)?;
+    let restore_token = started.get("restore_token").and_then(as_string);
     let fd = screencast
         .open_pipe_wire_remote(&session, HashMap::new())
         .map_err(|error| error.to_string())?;
     Ok(OpenedStream {
         fd: fd.into(),
         node,
+        output_name,
+        restore_token,
     })
 }
 
@@ -349,7 +399,8 @@ fn object_path(value: Option<&OwnedValue>) -> Result<OwnedObjectPath, String> {
     OwnedObjectPath::try_from(text).map_err(|error| error.to_string())
 }
 
-fn virtual_node(results: &HashMap<String, OwnedValue>) -> Result<u32, String> {
+/// The stream the portal opened, and the output it comes from.
+fn virtual_node(results: &HashMap<String, OwnedValue>) -> Result<(u32, Option<String>), String> {
     let value = results
         .get("streams")
         .ok_or_else(|| format!("the portal did not return a stream: {results:?}"))?;
@@ -360,11 +411,26 @@ fn virtual_node(results: &HashMap<String, OwnedValue>) -> Result<u32, String> {
         .ok_or_else(|| "the portal returned no stream".to_string())?;
     // 1 is a real monitor, 2 a window, 4 the new virtual screen.
     match meta.get("source_type").and_then(as_u32) {
-        Some(4) | None => Ok(*node),
-        Some(kind) => Err(format!(
-            "the portal shared an existing screen ({kind}). Accept the dialog that creates a new virtual screen."
-        )),
+        Some(4) | None => {}
+        Some(kind) => {
+            return Err(format!(
+                "the portal shared an existing screen ({kind}). Accept the dialog that creates a new virtual screen."
+            ))
+        }
     }
+    // The id of the stream is the name of the output. Some portals leave it
+    // empty, so it is only a hint.
+    let output_name = meta.get("id").and_then(as_string);
+    tracing::info!(
+        node,
+        output = output_name.as_deref().unwrap_or(""),
+        "the portal opened the virtual screen"
+    );
+    Ok((*node, output_name))
+}
+
+fn as_string(value: &OwnedValue) -> Option<String> {
+    String::try_from(value.clone()).ok()
 }
 
 fn as_u32(value: &OwnedValue) -> Option<u32> {
@@ -426,13 +492,24 @@ fn output_edges() -> Vec<(i64, i32, i32)> {
         .collect()
 }
 
-fn wait_for_output(before: &[ScreenOutput]) -> Option<ScreenOutput> {
-    let known: std::collections::HashSet<i64> = before.iter().map(|output| output.id).collect();
+/// The output the portal created.
+///
+/// The output ids change when the layout changes, so the name is what tells
+/// the new screen apart from the ones that were already there. The screen of
+/// the user is never returned, so it is never resized.
+fn find_output(wanted: Option<&str>, before: &[ScreenOutput]) -> Option<ScreenOutput> {
+    let known: std::collections::HashSet<&str> =
+        before.iter().map(|output| output.name.as_str()).collect();
     for _ in 0..40 {
         let outputs = list_outputs();
+        if let Some(name) = wanted {
+            if let Some(output) = outputs.iter().find(|output| output.name == name) {
+                return Some(output.clone());
+            }
+        }
         if let Some(output) = outputs
             .into_iter()
-            .find(|output| !known.contains(&output.id))
+            .find(|output| !known.contains(output.name.as_str()))
         {
             return Some(output);
         }

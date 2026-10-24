@@ -9,7 +9,15 @@ section. The release draft uses that section as its body.
 ### Fixed
 
 - The desktop adds a new virtual monitor. It no longer shares the existing screen.
+- The desktop leaves the screen of the user alone. The new virtual screen is found by name, so the resolution of the main display is never changed.
+- The desktop asks for the screen permission once. The permission is kept, so the dialog only appears the first time.
 - Pairing opens the phone camera. The code scanner no longer fails to open.
+- The phone scanner reads the code. The camera patch is part of the app now, and the reader is attached whatever order the camera receives its settings in.
+- A code the camera cannot read says so, instead of leaving the scanner open with nothing happening.
+
+### Changed
+
+- The window title bar drags the window again.
 
 ## [0.1.2] - 2026-10-23
 

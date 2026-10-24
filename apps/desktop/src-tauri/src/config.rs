@@ -118,11 +118,8 @@ pub fn config_path() -> PathBuf {
     base.join("kvm").join("config.toml")
 }
 
-/// Path of the paired device store.
-pub fn device_store_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("KVM_STORE_PATH") {
-        return PathBuf::from(path);
-    }
+/// Where the state of the server is kept.
+fn state_dir() -> PathBuf {
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -131,7 +128,20 @@ pub fn device_store_path() -> PathBuf {
                 .unwrap_or_default();
             home.join(".local").join("state")
         });
-    base.join("kvm").join("devices.json")
+    base.join("kvm")
+}
+
+/// Path of the paired device store.
+pub fn device_store_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("KVM_STORE_PATH") {
+        return PathBuf::from(path);
+    }
+    state_dir().join("devices.json")
+}
+
+/// Path of the permission the portal gave us.
+pub fn portal_permission_path() -> PathBuf {
+    state_dir().join("portal.json")
 }
 
 #[derive(Debug, thiserror::Error)]

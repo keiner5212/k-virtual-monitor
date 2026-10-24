@@ -17,15 +17,26 @@ index 62a1808a102174538f45599dc7e246d60e28d453..3cf07dbcd13848941e0aba32d70e747c
            .addOnSuccessListener { barcode ->
              val result = BarCodeScannerResultSerializer.parseBarcodeScanningResult(barcode)
 diff --git a/android/src/main/java/expo/modules/camera/ExpoCameraView.kt b/android/src/main/java/expo/modules/camera/ExpoCameraView.kt
-index a676d64e853b96fc838ea27165cf265929df91a1..0adc55a85cd070ab2b7869950d7a84bf96309146 100755
+index a676d64e853b96fc838ea27165cf265929df91a1..7ba53214add2b1bb6441cacae97eb94895d4f20c 100755
 --- a/android/src/main/java/expo/modules/camera/ExpoCameraView.kt
 +++ b/android/src/main/java/expo/modules/camera/ExpoCameraView.kt
-@@ -727,6 +727,13 @@ class ExpoCameraView(
+@@ -723,10 +723,24 @@ class ExpoCameraView(
+   fun setShouldScanBarcodes(shouldScanBarcodes: Boolean) {
+     this.shouldScanBarcodes = shouldScanBarcodes
+     shouldCreateCamera = true
++    // The analyzer is only attached when the camera is created, so turning
++    // scanning on has to rebuild the camera.
++    if (shouldScanBarcodes && barcodeFormats.isNotEmpty()) {
++      scope.launch {
++        createCamera()
++      }
++    }
+   }
  
    fun setBarcodeScannerSettings(settings: BarcodeSettings?) {
      barcodeFormats = settings?.barcodeTypes ?: emptyList()
 +    // The analyzer copies formats when the camera is created, so a later change must rebuild it.
-+    if (shouldScanBarcodes) {
++    if (shouldScanBarcodes && barcodeFormats.isNotEmpty()) {
 +      shouldCreateCamera = true
 +      scope.launch {
 +        createCamera()
@@ -34,7 +45,7 @@ index a676d64e853b96fc838ea27165cf265929df91a1..0adc55a85cd070ab2b7869950d7a84bf
    }
  
    private fun transformBarcodeScannerResultToViewCoordinates(barcode: BarCodeScannerResult) {
-@@ -842,8 +850,8 @@ class ExpoCameraView(
+@@ -842,8 +856,8 @@ class ExpoCameraView(
        onBarcodeScanned(
          BarcodeScannedEvent(
            target = id,

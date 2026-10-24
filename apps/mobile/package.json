@@ -26,6 +26,13 @@
         "react-native-safe-area-context": "~5.10.1",
         "react-native-tcp-socket": "6.4.3"
     },
+    "expo": {
+        "autolinking": {
+            "buildFromSource": [
+                "expo-camera"
+            ]
+        }
+    },
     "devDependencies": {
         "@eslint/js": "10.0.1",
         "@types/react": "19.2.4",

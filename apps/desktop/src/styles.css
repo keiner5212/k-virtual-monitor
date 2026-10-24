@@ -32,12 +32,3 @@ body {
     overflow: hidden;
     user-select: none;
 }
-
-/* The window has no decorations, so the title bar is ours. */
-.drag-region {
-    -webkit-app-region: drag;
-}
-
-.no-drag {
-    -webkit-app-region: no-drag;
-}

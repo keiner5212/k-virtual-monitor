@@ -55,8 +55,12 @@ export default function PairScreen({ onPair, onBack, error }: PairScreenProps) {
     }, []);
 
     const onBarcodeScanned = useCallback((result: BarcodeScanningResult) => {
+        if (lock.current) {
+            return;
+        }
         const payload = `${result.raw || result.data || ""}`.trim();
-        if (!payload || payload === "null" || lock.current) {
+        if (!payload || payload === "null") {
+            setLocalError("The camera read an empty code. Point it at the code on the desktop.");
             return;
         }
         lock.current = true;
@@ -110,9 +114,30 @@ export default function PairScreen({ onPair, onBack, error }: PairScreenProps) {
                         setCameraOn(false);
                         setLocalError(event.message || "The camera could not open.");
                     }}
+                    accessible={false}
+                    importantForAccessibility="no"
+                    accessibilityElementsHidden
                 />
-                <View style={styles.scannerShade} pointerEvents="none" />
-                <Text style={styles.scannerHint}>Fill the frame with the code on the desktop</Text>
+                <View style={styles.scannerShade} pointerEvents="none" importantForAccessibility="no" />
+                {localError ? (
+                    <View style={styles.scannerError}>
+                        <Text
+                            accessibilityRole="alert"
+                            accessibilityLiveRegion="assertive"
+                            numberOfLines={3}
+                            style={[styles.error, styles.scannerErrorText]}
+                        >
+                            {localError}
+                        </Text>
+                    </View>
+                ) : null}
+                <Text
+                    style={styles.scannerHint}
+                    accessibilityRole="text"
+                    accessibilityLabel="Camera viewfinder. Fill the frame with the code shown on the desktop."
+                >
+                    Fill the frame with the code on the desktop
+                </Text>
                 <View style={styles.scannerBar}>
                     <Pressable accessibilityRole="button" style={[styles.secondary, styles.scannerButton]} onPress={() => setTorch((on) => !on)}>
                         <Text style={styles.secondaryLabel}>{torch ? "Light off" : "Light"}</Text>
@@ -256,6 +281,22 @@ const styles = StyleSheet.create({
         color: colors.ink,
         fontSize: 14,
         lineHeight: 20,
+    },
+    scannerError: {
+        position: "absolute",
+        bottom: "82%",
+        marginBottom: space[2],
+        alignSelf: "center",
+        maxWidth: "76%",
+        backgroundColor: colors.raised,
+        borderWidth: 1,
+        borderColor: colors.danger,
+        borderRadius: radius.overlay,
+        paddingHorizontal: space[3],
+        paddingVertical: space[2],
+    },
+    scannerErrorText: {
+        textAlign: "center",
     },
     scannerBar: {
         position: "absolute",

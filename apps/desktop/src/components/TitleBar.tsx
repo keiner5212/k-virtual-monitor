@@ -1,11 +1,12 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import type { MouseEvent } from "react";
 
 interface TitleBarProps {
     serverName: string;
 }
 
 const buttonClass =
-    "no-drag flex h-10 w-11 items-center justify-center text-ink-muted transition-colors duration-150 hover:bg-white/5 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-inset";
+    "flex h-10 w-11 items-center justify-center text-ink-muted transition-colors duration-150 hover:bg-white/5 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-inset";
 
 export default function TitleBar({ serverName }: TitleBarProps) {
     // The window is only available inside the Tauri webview. Reading it
@@ -13,9 +14,20 @@ export default function TitleBar({ serverName }: TitleBarProps) {
     // layout is reviewed.
     const appWindow = () => getCurrentWindow();
 
+    // The window has no decorations, so the title bar is the drag handle.
+    const startDragging = (event: MouseEvent) => {
+        if (event.button !== 0) {
+            return;
+        }
+        void appWindow().startDragging();
+    };
+
     return (
-        <header className="drag-region flex h-10 shrink-0 items-center justify-between border-b border-border-subtle bg-surface-raised pl-4 pr-1">
-            <div className="drag-region flex items-center gap-2.5">
+        <header
+            className="flex h-10 shrink-0 items-center justify-between border-b border-border-subtle bg-surface-raised pl-4 pr-1"
+            onMouseDown={startDragging}
+        >
+            <div className="flex items-center gap-2.5">
                 <div className="flex h-5 w-5 items-center justify-center rounded-md bg-accent-soft text-[11px] font-bold text-accent">
                     K
                 </div>
@@ -24,7 +36,7 @@ export default function TitleBar({ serverName }: TitleBarProps) {
                 <span className="hidden font-sans text-xs text-ink-muted min-[680px]:inline">{serverName}</span>
             </div>
 
-            <div className="no-drag flex items-center">
+            <div className="flex items-center" onMouseDown={(event) => event.stopPropagation()}>
                 <button
                     type="button"
                     className={buttonClass}

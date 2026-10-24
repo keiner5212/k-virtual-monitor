@@ -4,8 +4,8 @@
 
 - Every build, test run, or tool that writes generated or temporary files writes inside the workspace at `./.tmp`.
 - Never write to `/tmp` or any other system temp dir. Point `TMPDIR`, `CARGO_TARGET_DIR`, `--out-dir`, and cache paths at `./.tmp`.
-- Cargo already resolves this in `.cargo/config.toml` (`CARGO_TARGET_DIR = .tmp/target`). Reuse it, do not add a second target dir.
-- The Rust tests already use the workspace scratch dir (`apps/desktop/src-tauri/src/virtual_output.rs`, `KVM_TMP` or `.tmp`).
+- Cargo already resolves this in `.cargo/config.toml` (`[build] target-dir = ".tmp/target"`). Reuse it, do not add a second target dir.
+- The Rust tests use the workspace scratch dir (`kvm_desktop_lib::scratch_dir`, or `KVM_TMP`).
 - `.tmp` is gitignored. Never commit its contents.
 
 ## Commits

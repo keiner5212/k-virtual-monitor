@@ -4,6 +4,21 @@ Each app version needs a section in this file. The version is the one in
 `apps/desktop/package.json`. CI rejects a bump that does not add the matching
 section. The release draft uses that section as its body.
 
+## [0.1.6] - 2026-10-24
+
+### Changed
+
+- Every picture of the stream is compressed with H.264. There is no JPEG any more: a picture that travels alone costs far more than the link can carry. The desktop asks for the plugin of the encoder and says so when it is missing.
+- The phone asks for H.264 and says when the build has no decoder. It never falls back to another codec on its own.
+- The picture goes to the phone as it is, without the detour of the base64 text. The phone spends its processor on the picture and not on the text around it.
+- The encoder repeats the last picture of the screen when nothing changes, so the stream keeps the rate it was asked for and the phone always has a picture.
+
+### Fixed
+
+- The picture of the virtual screen reaches the phone as soon as the compositor paints it. The capture takes about ten milliseconds from the change on the screen to the picture that is sent.
+- The list of the paired devices does not fill with copies of the same phone. The entry of the model is the entry of the phone, even when the app is installed again and the phone comes back with another id.
+- A panic does not take the server down any more, and a lock that was left by a panic does not stop the phones from connecting.
+
 ## [0.1.5] - 2026-10-24
 
 ### Fixed

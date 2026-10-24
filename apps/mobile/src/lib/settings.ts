@@ -1,8 +1,8 @@
 /**
  * The settings of the phone app.
  *
- * They are stored in the async storage, except the pairing secret, which
- * lives in the secure store.
+ * They are stored in the async storage. The size of the stream is not here:
+ * the desktop decides it and the phone shows what it decided.
  */
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -14,15 +14,6 @@ export type CodecPreference = "auto" | "h264" | "h265" | "jpeg";
 export interface AppSettings {
     /** Which compression the phone asks the server for. */
     codecPreference: CodecPreference;
-    /** Largest frame the phone accepts, in pixels. */
-    maxWidth: number;
-    maxHeight: number;
-    /** Largest frame rate the phone accepts. */
-    maxFps: number;
-    /** Delay before the first reconnection attempt. */
-    reconnectDelayMs: number;
-    /** Longest delay between two reconnection attempts. */
-    reconnectMaxDelayMs: number;
     /** Keep the screen on while the session is live. */
     keepAwake: boolean;
     /** Show the frame rate and the codec in the viewer. */
@@ -31,11 +22,6 @@ export interface AppSettings {
 
 export const DEFAULT_SETTINGS: AppSettings = {
     codecPreference: "auto",
-    maxWidth: 1920,
-    maxHeight: 1200,
-    maxFps: 30,
-    reconnectDelayMs: 1000,
-    reconnectMaxDelayMs: 10000,
     keepAwake: true,
     showStats: true,
 };
@@ -46,16 +32,25 @@ function storageKey(deviceId: string): string {
     return `${STORAGE_KEY}.${deviceId}`;
 }
 
+/**
+ * The settings of this phone.
+ *
+ * Only the known keys are read, so a setting that an older build left behind
+ * does not pile up in the state of the app.
+ */
 export async function loadSettings(deviceId: string | null): Promise<AppSettings> {
     try {
-        const raw = deviceId
-            ? (await AsyncStorage.getItem(storageKey(deviceId))) ?? (await AsyncStorage.getItem(STORAGE_KEY))
-            : await AsyncStorage.getItem(STORAGE_KEY);
+        const key = deviceId ? storageKey(deviceId) : STORAGE_KEY;
+        const raw = (await AsyncStorage.getItem(key)) ?? (await AsyncStorage.getItem(STORAGE_KEY));
         if (!raw) {
             return DEFAULT_SETTINGS;
         }
         const parsed = JSON.parse(raw) as Partial<AppSettings>;
-        return { ...DEFAULT_SETTINGS, ...parsed };
+        return {
+            codecPreference: parsed.codecPreference ?? DEFAULT_SETTINGS.codecPreference,
+            keepAwake: parsed.keepAwake ?? DEFAULT_SETTINGS.keepAwake,
+            showStats: parsed.showStats ?? DEFAULT_SETTINGS.showStats,
+        };
     } catch {
         return DEFAULT_SETTINGS;
     }
@@ -101,12 +96,3 @@ export const CODEC_PREFERENCES: Array<{ value: CodecPreference; label: string; h
     { value: "h265", label: "H.265", hint: "Less bandwidth, newer phones only" },
     { value: "jpeg", label: "JPEG", hint: "Every frame on its own, the most bandwidth" },
 ];
-
-export const RESOLUTIONS: Array<{ label: string; width: number; height: number }> = [
-    { label: "1920 x 1200", width: 1920, height: 1200 },
-    { label: "1920 x 1080", width: 1920, height: 1080 },
-    { label: "1408 x 792", width: 1408, height: 792 },
-    { label: "1280 x 720", width: 1280, height: 720 },
-];
-
-export const FRAME_RATES = [15, 20, 30, 60];

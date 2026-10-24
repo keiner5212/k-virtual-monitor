@@ -7,6 +7,7 @@
 //! a desktop session.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use kvm_protocol::messages::codec;
 use kvm_protocol::messages::FrameHeader;
@@ -15,7 +16,9 @@ use kvm_protocol::messages::FrameHeader;
 #[derive(Clone)]
 pub struct EncodedFrame {
     pub header: FrameHeader,
-    pub payload: Vec<u8>,
+    /// The picture. It is shared, so a frame can be handed to the session
+    /// without copying the whole picture again.
+    pub payload: Arc<Vec<u8>>,
 }
 
 /// The size and rate a phone asked for, or the desktop set for that phone.
@@ -65,6 +68,10 @@ pub trait FrameSource: Send + Sync {
 
     /// Starts the capture again after the user cancelled the share dialog.
     fn restart(&self) {}
+
+    /// Stops the capture and gives back everything it holds: the screen it
+    /// created, the encoder and the process it started.
+    fn stop(&self) {}
 }
 
 /// A test pattern, encoded as JPEG.
@@ -142,7 +149,7 @@ impl FrameSource for SyntheticSource {
                 height: mode.height,
                 codec: codec::wire_value(codec::JPEG),
             },
-            payload,
+            payload: Arc::new(payload),
         })
     }
 }

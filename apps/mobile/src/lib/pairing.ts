@@ -3,24 +3,33 @@
  *
  * The pairing secret goes to the secure store, the rest of the pairing
  * (the name and the address of the desktop) goes to the regular storage.
+ * The id of the phone goes to the secure store as well: the desktop knows
+ * the phone by that id, so it has to survive a new pairing.
  */
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
 
-import { decodePairingBlob } from "@kvm/protocol";
+import { decodePairingBlob, randomBytes } from "@kvm/protocol";
 
 const SECRET_KEY = "kvm.pairing.secret";
 const META_KEY = "kvm.pairing.meta";
+const ID_KEY = "kvm.device.id";
 
 interface PairingMeta {
-    deviceId: string;
+    /** The shape of the saved pairing. An old one is dropped. */
+    version: number;
     serverName: string;
     host: string;
     port: number;
 }
 
+/** The version of the saved pairing. */
+const PAIRING_VERSION = 2;
+
 export interface StoredPairing extends PairingMeta {
+    /** The id of this phone, as the desktop knows it. */
+    deviceId: string;
     /** The bytes of the device id, as they travel in the handshake. */
     deviceIdBytes: Uint8Array;
     psk: Uint8Array;
@@ -29,14 +38,15 @@ export interface StoredPairing extends PairingMeta {
 export async function savePairing(blob: string): Promise<StoredPairing> {
     const parsed = decodePairingBlob(blob.trim());
     const meta: PairingMeta = {
-        deviceId: hex(parsed.deviceId),
+        version: PAIRING_VERSION,
         serverName: parsed.serverName,
         host: parsed.host,
         port: parsed.port,
     };
     await SecureStore.setItemAsync(SECRET_KEY, hex(parsed.psk));
     await AsyncStorage.setItem(META_KEY, JSON.stringify(meta));
-    return { ...meta, deviceIdBytes: parsed.deviceId, psk: parsed.psk };
+    const id = await deviceId();
+    return { ...meta, deviceId: hex(id), deviceIdBytes: id, psk: parsed.psk };
 }
 
 export async function loadPairing(): Promise<StoredPairing | null> {
@@ -49,11 +59,14 @@ export async function loadPairing(): Promise<StoredPairing | null> {
         return null;
     }
     const meta = JSON.parse(raw) as PairingMeta;
-    return {
-        ...meta,
-        deviceIdBytes: unhex(meta.deviceId),
-        psk: unhex(secret),
-    };
+    if (meta.version !== PAIRING_VERSION) {
+        // A pairing of an older build: the phone did not own its id yet, so
+        // the desktop would not know it. It has to pair again.
+        await clearPairing();
+        return null;
+    }
+    const id = await deviceId();
+    return { ...meta, deviceId: hex(id), deviceIdBytes: id, psk: unhex(secret) };
 }
 
 export async function clearPairing(): Promise<void> {
@@ -64,12 +77,17 @@ export async function clearPairing(): Promise<void> {
 /**
  * The id of this phone.
  *
- * The desktop generates it during the pairing and puts it in the code, so
- * both ends agree on the id that selects the pairing secret. The phone
- * never invents one.
+ * The phone owns it: it is made once and kept in the secure store, so the
+ * desktop always knows the same phone, even when it pairs again.
  */
-export function deviceIdBytes(pairing: StoredPairing): Uint8Array {
-    return pairing.deviceIdBytes;
+export async function deviceId(): Promise<Uint8Array> {
+    const stored = await SecureStore.getItemAsync(ID_KEY);
+    if (stored) {
+        return unhex(stored);
+    }
+    const bytes = randomBytes(16);
+    await SecureStore.setItemAsync(ID_KEY, hex(bytes));
+    return bytes;
 }
 
 function hex(bytes: Uint8Array): string {

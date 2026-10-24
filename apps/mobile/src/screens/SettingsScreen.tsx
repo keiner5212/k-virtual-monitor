@@ -8,37 +8,29 @@
 
 import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
 
-import { codecFromWire, codecName, Codec } from "@kvm/protocol";
+import { codecFromWire, codecName, Codec, type DisplayInfo } from "@kvm/protocol";
 
 import type { StoredPairing } from "../lib/pairing";
-import {
-    CODEC_PREFERENCES,
-    FRAME_RATES,
-    RESOLUTIONS,
-    type AppSettings,
-    type CodecPreference,
-} from "../lib/settings";
-import { Chip, colors, radius, Row, Section, Segmented, space, Stepper, ToggleRow, type } from "../ui";
+import { CODEC_PREFERENCES, type AppSettings, type CodecPreference } from "../lib/settings";
+import { Chip, colors, radius, Row, Section, Segmented, space, ToggleRow, type } from "../ui";
 
 interface SettingsScreenProps {
     settings: AppSettings;
     onChange: (settings: AppSettings) => void;
     pairing: StoredPairing | null;
-    negotiatedCodec: number | null;
+    /** What the desktop decided for this phone. */
+    streamInfo: DisplayInfo | null;
     onUnpair: () => void;
 }
-
-const RECONNECT_DELAYS = [500, 1000, 2000, 5000];
-const RECONNECT_MAX_DELAYS = [5000, 10000, 30000, 60000];
 
 export default function SettingsScreen({
     settings,
     onChange,
     pairing,
-    negotiatedCodec,
+    streamInfo,
     onUnpair,
 }: SettingsScreenProps) {
-    const detected = negotiatedCodec === null ? null : codecFromWire(negotiatedCodec);
+    const detected = streamInfo === null ? null : codecFromWire(streamInfo.codec);
     const preference = CODEC_PREFERENCES.find(
         (option) => option.value === settings.codecPreference,
     );
@@ -46,18 +38,8 @@ export default function SettingsScreen({
         detected !== null &&
         settings.codecPreference !== "auto" &&
         detected !== codecBit(settings.codecPreference);
-
-    const resolutionOptions = RESOLUTIONS.some(
-        (option) => option.width === settings.maxWidth && option.height === settings.maxHeight,
-    )
-        ? RESOLUTIONS
-        : [
-            { label: `${settings.maxWidth} x ${settings.maxHeight}`, width: settings.maxWidth, height: settings.maxHeight },
-            ...RESOLUTIONS,
-        ];
-    const frameRates = FRAME_RATES.includes(settings.maxFps)
-        ? FRAME_RATES
-        : [...FRAME_RATES, settings.maxFps].sort((left, right) => left - right);
+    const live = streamInfo !== null;
+    const valueStyle = live ? type.mono : type.monoMuted;
 
     return (
         <View style={styles.root}>
@@ -91,62 +73,22 @@ export default function SettingsScreen({
                 </View>
             </Section>
 
-            <Section title="Stream" hint="The largest frame and frame rate the phone accepts.">
+            <Section
+                title="Stream"
+                hint="The desktop sets the frame size and the frame rate for every phone."
+            >
                 <Row label="Resolution">
-                    <Stepper
-                        value={settings.maxWidth * 10000 + settings.maxHeight}
-                        options={resolutionOptions.map((resolution) => resolution.width * 10000 + resolution.height)}
-                        onChange={(id) => {
-                            onChange({
-                                ...settings,
-                                maxWidth: Math.floor(id / 10000),
-                                maxHeight: id % 10000,
-                            });
-                        }}
-                        format={(id) => {
-                            const width = Math.floor(id / 10000);
-                            const height = id % 10000;
-                            return (
-                                resolutionOptions.find(
-                                    (option) => option.width === width && option.height === height,
-                                )?.label ?? `${width} x ${height}`
-                            );
-                        }}
-                        accessibilityLabel="Resolution"
-                    />
+                    <Text style={valueStyle}>
+                        {live ? `${streamInfo.width} x ${streamInfo.height}` : "Not connected"}
+                    </Text>
                 </Row>
                 <Row label="Frame rate">
-                    <Stepper
-                        value={settings.maxFps}
-                        options={frameRates}
-                        onChange={(maxFps) => onChange({ ...settings, maxFps })}
-                        format={(fps) => `${fps} fps`}
-                        accessibilityLabel="Frame rate"
-                    />
+                    <Text style={valueStyle}>{live ? `${streamInfo.fps} fps` : "Not connected"}</Text>
                 </Row>
-            </Section>
-
-            <Section
-                title="Connection"
-                hint="How fast the phone comes back when the desktop goes away."
-            >
-                <Row label="First retry">
-                    <Stepper
-                        value={settings.reconnectDelayMs}
-                        options={RECONNECT_DELAYS}
-                        onChange={(reconnectDelayMs) => onChange({ ...settings, reconnectDelayMs })}
-                        format={(delay) => `${delay / 1000} s`}
-                        accessibilityLabel="First retry"
-                    />
-                </Row>
-                <Row label="Longest wait">
-                    <Stepper
-                        value={settings.reconnectMaxDelayMs}
-                        options={RECONNECT_MAX_DELAYS}
-                        onChange={(reconnectMaxDelayMs) => onChange({ ...settings, reconnectMaxDelayMs })}
-                        format={(delay) => `${delay / 1000} s`}
-                        accessibilityLabel="Longest wait"
-                    />
+                <Row label="Codec">
+                    <Text style={valueStyle}>
+                        {detected === null ? "Not connected" : codecName(detected).toUpperCase()}
+                    </Text>
                 </Row>
             </Section>
 

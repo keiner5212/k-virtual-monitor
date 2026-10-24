@@ -11,3 +11,4 @@ export * from "./messages";
 export * from "./handshake";
 export * from "./session";
 export * from "./pairing";
+export * from "./resolutions";

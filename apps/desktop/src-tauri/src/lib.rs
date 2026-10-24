@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use kvm_protocol::crypto::Psk;
 use kvm_protocol::pairing::{format_safety_code, PairingBlob};
 use rand::RngCore;
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::config::ServerConfig;
 use crate::devices::{hex, unhex, unix_now, DeviceEntry, DeviceStore, CAP_CONTROL, CAP_VIEW};
@@ -213,7 +213,7 @@ fn paired_devices(state: State<'_, AppState>) -> Vec<DeviceInfo> {
             } else {
                 entry.jpeg_quality
             },
-            connected: state.server.active_device().as_deref() == Some(entry.id.as_str()),
+            connected: state.server.is_connected(&entry.id),
         })
         .collect()
 }
@@ -367,8 +367,20 @@ pub fn run() {
             save_device_settings,
             restart_capture
         ])
-        .run(tauri::generate_context!())
-        .expect("cannot start the application");
+        .build(tauri::generate_context!())
+        .expect("cannot start the application")
+        .run(|handle, event| match event {
+            tauri::RunEvent::WindowEvent {
+                event: tauri::WindowEvent::CloseRequested { .. },
+                ..
+            } => {
+                // The window is the app: the virtual screen and the encoder
+                // go away with it.
+                handle.state::<AppState>().server.stop_capture();
+            }
+            tauri::RunEvent::Exit => handle.state::<AppState>().server.stop_capture(),
+            _ => {}
+        });
 }
 
 /// Runs the server without the user interface.
@@ -452,6 +464,6 @@ fn prune(store: &mut DeviceStore, store_path: &Path, now: u64) {
     }
 }
 
-fn now_stamp() -> String {
+pub(crate) fn now_stamp() -> String {
     format!("unix:{}", unix_now())
 }

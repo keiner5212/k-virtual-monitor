@@ -2,13 +2,14 @@
   "expo": {
     "name": "k-virtual-monitor",
     "slug": "k-virtual-monitor",
-    "version": "0.1.3",
+    "version": "0.1.4",
     "icon": "./assets/icon.png",
     "orientation": "landscape",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#101014",
     "android": {
       "package": "dev.kvm.app",
+      "enableProguardInReleaseBuilds": false,
       "permissions": [
         "CAMERA",
         "INTERNET",

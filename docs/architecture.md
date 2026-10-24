@@ -42,6 +42,12 @@ together: a change in one that is not mirrored in the other fails the tests.
 
 - `apps/mobile` is an Expo app. Metro is configured to watch the workspace,
   so the protocol package is compiled from source.
+- The phone owns its id. It is made once and kept in the secure store, so the
+  desktop knows the same phone even after it pairs again, and the device list
+  does not fill up with copies of it.
+- The desktop owns the size of the stream. It picks a size and a frame rate
+  for every phone, the phone only says what it can show, and the list of
+  sizes is the same on both sides.
 - The client keeps only the newest frame. A late frame is worth less than
   the one that replaced it, and a queue would turn a slow network into a
   growing lag.

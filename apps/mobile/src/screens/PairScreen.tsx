@@ -8,7 +8,7 @@
  */
 
 import { CameraView, useCameraPermissions, type BarcodeScanningResult } from "expo-camera";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     Pressable,
     ScrollView,
@@ -26,6 +26,11 @@ interface PairScreenProps {
     onPair: (blob: string) => Promise<void>;
     onBack: () => void;
     error: string | null;
+}
+
+/** The scanner of the system says so when the user closes it. */
+function isScanCancelled(cause: unknown): boolean {
+    return cause instanceof Error && cause.message.toLowerCase().includes("cancelled");
 }
 
 export default function PairScreen({ onPair, onBack, error }: PairScreenProps) {
@@ -68,6 +73,20 @@ export default function PairScreen({ onPair, onBack, error }: PairScreenProps) {
         stage(payload);
     }, [stage]);
 
+    useEffect(() => {
+        // The scanner of the system sends the code as an event, not as the
+        // answer of the call that opened it.
+        const subscription = CameraView.onModernBarcodeScanned((event) => {
+            const payload = `${event.data ?? ""}`.trim();
+            if (!payload || lock.current) {
+                return;
+            }
+            lock.current = true;
+            stage(payload);
+        });
+        return () => subscription.remove();
+    }, [stage]);
+
     const scan = async () => {
         const current = permission?.granted ? permission : await requestPermission();
         if (!current.granted) {
@@ -76,7 +95,21 @@ export default function PairScreen({ onPair, onBack, error }: PairScreenProps) {
         }
         lock.current = false;
         setLocalError(null);
-        setCameraOn(true);
+        if (!CameraView.isModernBarcodeScannerAvailable) {
+            setCameraOn(true);
+            return;
+        }
+        // The scanner of the system reads the code faster and more
+        // consistently than the camera in the app, so it goes first. The
+        // camera in the app is the fallback.
+        try {
+            await CameraView.launchScanner({ barcodeTypes: ["qr"] });
+        } catch (cause) {
+            if (isScanCancelled(cause)) {
+                return;
+            }
+            setCameraOn(true);
+        }
     };
 
     const confirm = async () => {

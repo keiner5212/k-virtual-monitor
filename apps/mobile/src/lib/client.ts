@@ -32,6 +32,12 @@ const MAX_PAYLOAD = 4 * 1024 * 1024;
 /** How often the phone says hello, so the desktop does not close the session. */
 const HEARTBEAT_MS = 30000;
 
+/** How fast the phone comes back when the desktop goes away. */
+const RECONNECT_DELAY_MS = 1000;
+
+/** The longest wait between two attempts. */
+const RECONNECT_MAX_DELAY_MS = 10000;
+
 /** Bytes of the frame header that precede the picture. */
 const FRAME_HEADER_LEN = 14;
 
@@ -262,7 +268,6 @@ export class ReconnectingClient {
     constructor(
         private readonly options: ConnectOptions,
         private readonly events: ClientEvents & { onReconnectIn: (seconds: number | null) => void },
-        private readonly policy: { delayMs: number; maxDelayMs: number },
     ) { }
 
     get frames(): LatestFrame {
@@ -339,7 +344,10 @@ export class ReconnectingClient {
         if (this.stopped || this.timer) {
             return;
         }
-        const delay = Math.min(this.policy.delayMs * 2 ** this.attempt, this.policy.maxDelayMs);
+        const delay = Math.min(
+            RECONNECT_DELAY_MS * 2 ** this.attempt,
+            RECONNECT_MAX_DELAY_MS,
+        );
         this.attempt += 1;
         this.events.onReconnectIn(Math.round(delay / 1000));
         this.timer = setTimeout(() => {

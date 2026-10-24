@@ -7,6 +7,7 @@
 //! The frame sender and the input reader share one task, so the sequence
 //! numbers of a session are only ever touched by one place.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,9 +25,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use crate::config::ServerConfig;
-use crate::devices::{hex, unhex, unix_now, DeviceStore};
+use crate::devices::{hex, unhex, unix_now, DeviceEntry, DeviceStore, CAP_CONTROL, CAP_VIEW};
+use crate::now_stamp;
 use crate::source::{EncodedFrame, FrameSource, StreamMode};
-
 /// What the live session is doing, for the user interface.
 #[derive(Debug, Clone, Default)]
 pub struct SessionInfo {
@@ -45,6 +46,7 @@ pub struct Server {
     pending: Arc<AtomicUsize>,
     session_info: Arc<Mutex<Option<SessionInfo>>>,
     active_device: Arc<Mutex<Option<String>>>,
+    connected: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Server {
@@ -63,6 +65,7 @@ impl Server {
             pending: Arc::new(AtomicUsize::new(0)),
             session_info: Arc::new(Mutex::new(None)),
             active_device: Arc::new(Mutex::new(None)),
+            connected: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -88,6 +91,14 @@ impl Server {
         self.active_device.lock().ok().and_then(|id| id.clone())
     }
 
+    /// Whether the device has a live session right now.
+    pub fn is_connected(&self, id: &str) -> bool {
+        self.connected
+            .lock()
+            .map(|devices| devices.contains(id))
+            .unwrap_or(false)
+    }
+
     /// What the capture wants the user to know.
     pub fn capture_status(&self) -> String {
         self.source.status()
@@ -104,6 +115,11 @@ impl Server {
     /// Opens the share dialog again after the user cancelled it.
     pub fn restart_capture(&self) {
         self.source.restart();
+    }
+
+    /// Stops the capture. The virtual screen and the encoder go away with it.
+    pub fn stop_capture(&self) {
+        self.source.stop();
     }
 
     /// Binds the listener. The port may be zero, in which case the system
@@ -185,13 +201,13 @@ impl Server {
         let handshake = tokio::time::timeout(
             Duration::from_secs(self.config.handshake_timeout_secs),
             server_handshake_with(&mut stream, &self.config.server_name, |hello| {
-                self.psk_for(hello)
+                self.psk_candidates(hello)
             }),
         )
         .await;
         self.pending.fetch_sub(1, Ordering::Relaxed);
 
-        let (keys, hello) = match handshake {
+        let (keys, hello, psk) = match handshake {
             Ok(Ok(result)) => result,
             Ok(Err(error)) => {
                 tracing::info!(%peer, %error, "handshake refused");
@@ -203,33 +219,12 @@ impl Server {
             }
         };
 
-        let entry = {
-            let mut store = self.store.lock().expect("device store is not poisoned");
-            let Some(entry) = store.find(&hex(&hello.device_id)).cloned() else {
-                return;
-            };
-            if entry.revoked {
-                tracing::info!(%peer, device = %entry.name, "the device was revoked");
-                return;
-            }
-            let mode = mode_for(&hello, &self.config, entry.jpeg_quality);
-            let mut updated = entry.clone();
-            updated.name = hello.device_name.clone();
-            updated.paired = true;
-            updated.width = mode.width;
-            updated.height = mode.height;
-            updated.fps = mode.fps;
-            updated.jpeg_quality = mode.quality;
-            let changed = updated != entry;
-            store.upsert(updated.clone());
-            if changed {
-                if let Err(error) = store.save(&self.store_path) {
-                    tracing::error!(%error, "cannot save the device store");
-                }
-            }
-            updated
+        let entry = self.adopt_device(&hello, &psk);
+        let Some(entry) = entry else {
+            tracing::info!(%peer, "the device is not allowed to connect");
+            return;
         };
-        let mut mode = mode_for(&hello, &self.config, entry.jpeg_quality);
+        let mut mode = mode_for(&hello, &self.config, &entry);
         let Some(codec) = codec::negotiate(hello.codec_mask, self.source.codecs()) else {
             tracing::info!(%peer, "the client cannot decode any codec we produce");
             return;
@@ -251,6 +246,9 @@ impl Server {
         if let Ok(mut active) = self.active_device.lock() {
             *active = Some(entry.id.clone());
         }
+        if let Ok(mut devices) = self.connected.lock() {
+            devices.insert(entry.id.clone());
+        }
         let result = self
             .run_session(stream, keys, entry.caps, codec, entry.name.clone())
             .await;
@@ -259,6 +257,9 @@ impl Server {
                 *active = None;
             }
         }
+        if let Ok(mut devices) = self.connected.lock() {
+            devices.remove(&entry.id);
+        }
         self.sessions.fetch_sub(1, Ordering::Relaxed);
         if let Ok(mut info) = self.session_info.lock() {
             *info = None;
@@ -266,19 +267,78 @@ impl Server {
         tracing::info!(%peer, ?result, "session ended");
     }
 
-    fn psk_for(&self, hello: &Hello) -> Option<Psk> {
-        let id = hex(&hello.device_id);
+    /// The pairing secrets that may match this greeting: the secret of the
+    /// phone that is already known and the secret of the pairing code that is
+    /// waiting for a phone.
+    fn psk_candidates(&self, hello: &Hello) -> Vec<Psk> {
         let mut store = self.store.lock().expect("device store is not poisoned");
         // The store file is the source of truth: a code created by the
         // command line while the app was running has to be accepted.
         if let Err(error) = store.reload(&self.store_path) {
             tracing::warn!(%error, "cannot read the device store");
         }
-        let entry = store.find(&id)?;
-        if entry.revoked || entry.is_expired(unix_now()) {
-            return None;
+        let mut candidates = Vec::new();
+        if let Some(entry) = store.find(&hex(&hello.device_id)) {
+            if let Some(psk) = psk_of(entry) {
+                candidates.push(psk);
+            }
         }
-        Psk::from_slice(&unhex(&entry.psk)?).ok()
+        if let Some(entry) = store.pending() {
+            // A pairing code that ran out of time is not accepted any more.
+            if !entry.is_expired(unix_now()) {
+                if let Some(psk) = psk_of(entry) {
+                    candidates.push(psk);
+                }
+            }
+        }
+        candidates
+    }
+
+    /// The entry of this phone, ready to be used.
+    ///
+    /// The phone owns its id and sends it in the greeting, so the entry takes
+    /// that id. The secret it proved decides which entry it is, so a phone
+    /// that pairs again lands in the same place instead of a new one.
+    fn adopt_device(&self, hello: &Hello, psk: &Psk) -> Option<DeviceEntry> {
+        let mut store = self.store.lock().expect("device store is not poisoned");
+        let psk_text = hex(psk.as_bytes());
+        let id = hex(&hello.device_id);
+        let mut updated = match store.find_by_psk(&psk_text).cloned() {
+            Some(entry) => {
+                if entry.revoked {
+                    tracing::info!(device = %entry.name, "the device was revoked");
+                    return None;
+                }
+                entry
+            }
+            None => DeviceEntry {
+                id: id.clone(),
+                name: hello.device_name.clone(),
+                psk: psk_text.clone(),
+                caps: CAP_VIEW | CAP_CONTROL,
+                paired: false,
+                revoked: false,
+                created_at: now_stamp(),
+                expires_at: unix_now(),
+                width: 0,
+                height: 0,
+                fps: 0,
+                jpeg_quality: 0,
+            },
+        };
+        let old_id = updated.id.clone();
+        updated.id = id;
+        updated.name = hello.device_name.clone();
+        updated.paired = true;
+        // The phone only gets what it asked for, never more.
+        updated.caps &= hello.caps_requested;
+        // The entry of a phone is the only one: the old id is dropped.
+        store.remove(&old_id);
+        store.upsert(updated.clone());
+        if let Err(error) = store.save(&self.store_path) {
+            tracing::error!(%error, "cannot save the device store");
+        }
+        Some(updated)
     }
 
     async fn run_session(
@@ -537,27 +597,36 @@ impl Server {
     }
 }
 
-/// The phone's selection, kept inside what the virtual screen can show.
-fn mode_for(hello: &Hello, config: &ServerConfig, quality: u8) -> StreamMode {
-    let width = if (320..=3840).contains(&hello.max_width) {
-        hello.max_width
-    } else {
+/// The size of the stream for this phone.
+///
+/// The desktop decides: the size the user picked for this phone, never bigger
+/// than the phone can show. The phone only says what it can take.
+fn mode_for(hello: &Hello, config: &ServerConfig, entry: &DeviceEntry) -> StreamMode {
+    let width = if entry.width == 0 {
         config.width
-    };
-    let height = if (240..=2160).contains(&hello.max_height) {
-        hello.max_height
     } else {
-        config.height
+        entry.width
     };
-    let fps = if hello.max_fps == 0 {
+    let height = if entry.height == 0 {
+        config.height
+    } else {
+        entry.height
+    };
+    let (width, height) = fit(width, height, hello.max_width, hello.max_height);
+    let fps = if entry.fps == 0 {
         config.fps
     } else {
-        hello.max_fps
+        entry.fps
     };
-    let quality = if quality == 0 {
+    let fps = if hello.max_fps == 0 {
+        fps
+    } else {
+        fps.min(hello.max_fps)
+    };
+    let quality = if entry.jpeg_quality == 0 {
         config.jpeg_quality
     } else {
-        quality
+        entry.jpeg_quality
     };
     StreamMode {
         width,
@@ -567,4 +636,26 @@ fn mode_for(hello: &Hello, config: &ServerConfig, quality: u8) -> StreamMode {
         codec: 0,
     }
     .normalize()
+}
+
+/// Keeps the size inside what the phone can show, without changing its
+/// proportions.
+fn fit(width: u16, height: u16, limit_width: u16, limit_height: u16) -> (u16, u16) {
+    if limit_width == 0 || limit_height == 0 {
+        return (width, height);
+    }
+    let scale = (f32::from(limit_width) / f32::from(width))
+        .min(f32::from(limit_height) / f32::from(height));
+    if scale >= 1.0 {
+        return (width, height);
+    }
+    (
+        (f32::from(width) * scale) as u16,
+        (f32::from(height) * scale) as u16,
+    )
+}
+
+/// The pairing secret of an entry.
+fn psk_of(entry: &DeviceEntry) -> Option<Psk> {
+    Psk::from_slice(&unhex(&entry.psk)?).ok()
 }

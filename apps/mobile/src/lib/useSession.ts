@@ -6,6 +6,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Dimensions, PixelRatio, Platform } from "react-native";
 
 import type { DisplayInfo } from "@kvm/protocol";
 
@@ -63,11 +64,12 @@ export function useSession({ pairing, settings, active, openId, reloadToken, onD
                 port: pairing.port,
                 psk: pairing.psk,
                 deviceId: pairing.deviceIdBytes,
+                deviceName: deviceName(),
                 codecMask: codecMask(current.codecPreference),
                 caps: 0b11,
-                maxWidth: current.maxWidth,
-                maxHeight: current.maxHeight,
-                maxFps: current.maxFps,
+                maxWidth: capability().width,
+                maxHeight: capability().height,
+                maxFps: 60,
             },
             {
                 onState: (next, message) => {
@@ -80,7 +82,6 @@ export function useSession({ pairing, settings, active, openId, reloadToken, onD
                 },
                 onReconnectIn: (seconds) => setReconnectingIn(seconds),
             },
-            { delayMs: current.reconnectDelayMs, maxDelayMs: current.reconnectMaxDelayMs },
         );
         clientRef.current = client;
         setClient(client);
@@ -107,4 +108,27 @@ export function useSession({ pairing, settings, active, openId, reloadToken, onD
     }, [client]);
 
     return { state, detail, info, frame, reconnectingIn };
+}
+
+/** The name of the phone, so the desktop can tell the devices apart. */
+function deviceName(): string {
+    // React Native keeps the model of the device in the platform constants,
+    // but the types of the library do not name it.
+    const constants = Platform.constants as unknown as { Model?: string };
+    const model = constants.Model;
+    return model && model !== "unknown" ? model : "phone";
+}
+
+/**
+ * The biggest frame the phone can show, in pixels.
+ *
+ * The desktop picks the size and never sends more than this.
+ */
+function capability(): { width: number; height: number } {
+    const { width, height } = Dimensions.get("window");
+    const ratio = PixelRatio.get();
+    return {
+        width: Math.max(1, Math.round(width * ratio)),
+        height: Math.max(1, Math.round(height * ratio)),
+    };
 }

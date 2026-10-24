@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import QRCode from "react-qr-code";
 
+import { FRAME_RATES, RESOLUTIONS, type Resolution } from "@kvm/protocol";
+
 import CountUp from "./components/react-bits/CountUp";
 import SplitText from "./components/react-bits/SplitText";
 import SpotlightCard from "./components/react-bits/SpotlightCard";
@@ -31,6 +33,16 @@ const inputClass =
 
 const labelClass = "mb-1.5 block font-sans text-xs font-medium text-ink-muted";
 
+/**
+ * A dropdown that looks like the inputs. The open list is drawn by the
+ * operating system, so only the closed control can be styled.
+ */
+const selectClass =
+    "appearance-none bg-[length:0.75rem] bg-[position:right_0.625rem_center] bg-no-repeat pr-8";
+
+const selectChevron =
+    "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%238b93a7' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5'/%3E%3C/svg%3E\")";
+
 const primaryButton =
     "inline-flex h-9 items-center gap-2 rounded-lg bg-accent px-4 font-sans text-sm font-medium text-surface transition-colors hover:bg-accent/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface-raised active:scale-[0.98]";
 
@@ -44,6 +56,28 @@ function formatCountdown(seconds: number): string {
     const minutes = Math.floor(seconds / 60);
     const rest = seconds % 60;
     return `${minutes}:${rest.toString().padStart(2, "0")}`;
+}
+
+/** The sizes offered for a phone. The one it has now is always in the list. */
+function resolutionOptions(device: DeviceInfo): Resolution[] {
+    const known = RESOLUTIONS.some(
+        (option) => option.width === device.width && option.height === device.height,
+    );
+    if (known) {
+        return RESOLUTIONS;
+    }
+    return [
+        { label: `${device.width} x ${device.height}`, width: device.width, height: device.height },
+        ...RESOLUTIONS,
+    ];
+}
+
+/** The frame rates offered for a phone, with the one it has now in the list. */
+function frameRateOptions(fps: number): number[] {
+    if (FRAME_RATES.includes(fps)) {
+        return FRAME_RATES;
+    }
+    return [...FRAME_RATES, fps].sort((left, right) => left - right);
 }
 
 function StatTile({ label, children }: { label: string; children: React.ReactNode }) {
@@ -416,49 +450,43 @@ export default function App() {
                                     {deviceDraft && selectedId === device.id ? (
                                         <div className="mt-3 grid grid-cols-1 gap-3 min-[720px]:grid-cols-2">
                                             <div>
-                                                <span className={labelClass}>Resolution</span>
-                                                <div className="flex items-center gap-2">
-                                                    <input
-                                                        type="number"
-                                                        min={320}
-                                                        max={3840}
-                                                        aria-label="Width"
-                                                        className={inputClass}
-                                                        value={deviceDraft.width}
-                                                        onChange={(event) => {
-                                                            setEditedDevice({
-                                                                ...deviceDraft,
-                                                                width: Number(event.target.value) || 0,
-                                                            });
-                                                        }}
-                                                    />
-                                                    <span className="font-mono text-sm text-ink-muted">x</span>
-                                                    <input
-                                                        type="number"
-                                                        min={240}
-                                                        max={2160}
-                                                        aria-label="Height"
-                                                        className={inputClass}
-                                                        value={deviceDraft.height}
-                                                        onChange={(event) => {
-                                                            setEditedDevice({
-                                                                ...deviceDraft,
-                                                                height: Number(event.target.value) || 0,
-                                                            });
-                                                        }}
-                                                    />
-                                                </div>
+                                                <label className={labelClass} htmlFor={`resolution-${device.id}`}>
+                                                    Resolution
+                                                </label>
+                                                <select
+                                                    id={`resolution-${device.id}`}
+                                                    className={`${inputClass} ${selectClass}`}
+                                                    style={{ backgroundImage: selectChevron }}
+                                                    value={`${deviceDraft.width}x${deviceDraft.height}`}
+                                                    onChange={(event) => {
+                                                        const [width, height] = event.target.value
+                                                            .split("x")
+                                                            .map(Number);
+                                                        setEditedDevice({
+                                                            ...deviceDraft,
+                                                            width: width || 0,
+                                                            height: height || 0,
+                                                        });
+                                                    }}
+                                                >
+                                                    {resolutionOptions(deviceDraft).map((option) => (
+                                                        <option
+                                                            key={`${option.width}x${option.height}`}
+                                                            value={`${option.width}x${option.height}`}
+                                                        >
+                                                            {option.label}
+                                                        </option>
+                                                    ))}
+                                                </select>
                                             </div>
                                             <div>
                                                 <label className={labelClass} htmlFor={`fps-${device.id}`}>
                                                     Frame rate
                                                 </label>
-                                                <input
+                                                <select
                                                     id={`fps-${device.id}`}
-                                                    type="number"
-                                                    min={1}
-                                                    max={60}
-                                                    className={inputClass}
+                                                    className={`${inputClass} ${selectClass}`}
+                                                    style={{ backgroundImage: selectChevron }}
                                                     value={deviceDraft.fps}
                                                     onChange={(event) => {
                                                         setEditedDevice({
@@ -466,7 +494,13 @@ export default function App() {
                                                             fps: Number(event.target.value) || 0,
                                                         });
                                                     }}
-                                                />
+                                                >
+                                                    {frameRateOptions(deviceDraft.fps).map((fps) => (
+                                                        <option key={fps} value={fps}>
+                                                            {fps} fps
+                                                        </option>
+                                                    ))}
+                                                </select>
                                             </div>
                                             <div>
                                                 <label className={labelClass} htmlFor={`quality-${device.id}`}>

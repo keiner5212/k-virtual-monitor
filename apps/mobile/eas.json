@@ -7,15 +7,7 @@
         "development": {
             "developmentClient": true,
             "distribution": "internal",
-            "android": {
-                "buildType": "apk"
-            }
-        },
-        "preview": {
-            "distribution": "internal",
-            "android": {
-                "buildType": "apk"
-            }
+            "prebuildCommand": "npx expo prebuild --clean"
         },
         "production": {
             "android": {

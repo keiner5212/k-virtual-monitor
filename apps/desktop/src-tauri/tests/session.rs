@@ -346,3 +346,85 @@ async fn a_view_only_device_cannot_send_input() {
 
     std::fs::remove_dir_all(&fixture.dir).ok();
 }
+
+/// A phone that pairs again keeps the same entry.
+///
+/// The phone owns its id and sends it in the greeting, so the desktop knows
+/// it is the same phone and does not pile up entries.
+#[tokio::test]
+async fn a_phone_that_pairs_again_keeps_one_entry() {
+    let dir = std::env::temp_dir().join(format!("kvm-pair-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("the directory exists");
+    let store_path = dir.join("devices.json");
+
+    let psk = Psk::generate();
+    let phone_id = [9u8; 16];
+    let mut store = DeviceStore::default();
+    // The pairing code the phone scans: it has an id of its own.
+    store.upsert(DeviceEntry {
+        id: hex(&[1u8; 16]),
+        name: "pending phone".to_string(),
+        psk: hex(psk.as_bytes()),
+        caps: CAP_VIEW,
+        paired: false,
+        revoked: false,
+        created_at: "test".to_string(),
+        expires_at: u64::MAX,
+        width: 640,
+        height: 360,
+        fps: 0,
+        jpeg_quality: 0,
+    });
+
+    let config = ServerConfig {
+        port: 0,
+        bind: "127.0.0.1".to_string(),
+        width: 320,
+        height: 240,
+        fps: 20,
+        ..ServerConfig::default()
+    };
+    let server = Arc::new(Server::new(
+        config,
+        Arc::new(Mutex::new(store)),
+        store_path.clone(),
+        Arc::new(SyntheticSource::new(320, 240, 70)),
+    ));
+    let listener = server.bind().await.expect("the listener binds");
+    let port = listener
+        .local_addr()
+        .expect("the listener has an address")
+        .port();
+    let serving = server.clone();
+    tokio::spawn(async move {
+        let _ = serving.serve(listener).await;
+    });
+
+    let mut stream = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("the client connects");
+    let mut greeting = hello(phone_id);
+    // The phone can show more than the desktop picked for it.
+    greeting.max_width = 1920;
+    greeting.max_height = 1200;
+    let keys = client_handshake(&mut stream, &psk, &greeting)
+        .await
+        .expect("the handshake succeeds");
+    let mut session = Session::client(keys);
+
+    // The size of the desktop wins: the phone only says what it can take.
+    let (header, payload) = read_message(&mut stream)
+        .await
+        .expect("the display info arrives");
+    let plaintext = session.open(&header, &payload).expect("the info opens");
+    let info = kvm_protocol::messages::DisplayInfo::decode(&plaintext).expect("the info decodes");
+    assert_eq!(info.width, 640);
+    assert_eq!(info.height, 360);
+
+    let saved = DeviceStore::load(&store_path).expect("the store is readable");
+    assert_eq!(saved.devices.len(), 1, "the phone is one entry");
+    assert_eq!(saved.devices[0].id, hex(&phone_id));
+    assert!(saved.devices[0].paired);
+
+    std::fs::remove_dir_all(&dir).ok();
+}

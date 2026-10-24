@@ -4,7 +4,7 @@ import { BackHandler, Image, Pressable, ScrollView, StyleSheet, Text, View } fro
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 
-import { Codec, codecFromWire, codecName, codecWireValue, type DisplayInfo } from "@kvm/protocol";
+import { Codec, codecFromWire, codecName, codecWireValue } from "@kvm/protocol";
 import { decoderAvailable, KvmVideoView, type KvmVideoRef } from "kvm-decoder";
 
 import { clearPairing, loadPairing, savePairing, type StoredPairing } from "./src/lib/pairing";
@@ -54,32 +54,12 @@ function Monitor() {
         })();
     }, []);
 
-    const applyDisplay = useCallback((info: DisplayInfo) => {
-        if (!pairing) {
-            return;
-        }
-        setSettings((prev) => {
-            if (prev.maxWidth === info.width && prev.maxHeight === info.height && prev.maxFps === info.fps) {
-                return prev;
-            }
-            const next = {
-                ...prev,
-                maxWidth: info.width,
-                maxHeight: info.height,
-                maxFps: info.fps,
-            };
-            void saveSettings(pairing.deviceId, next);
-            return next;
-        });
-    }, [pairing]);
-
     const session = useSession({
         pairing,
         settings,
         active: route === "session",
         openId,
         reloadToken,
-        onDisplayInfo: applyDisplay,
     });
 
     useEffect(() => {
@@ -95,11 +75,7 @@ function Monitor() {
 
     const updateSettings = useCallback((next: AppSettings) => {
         setSettings((prev) => {
-            const streamChanged =
-                prev.codecPreference !== next.codecPreference ||
-                prev.maxWidth !== next.maxWidth ||
-                prev.maxHeight !== next.maxHeight ||
-                prev.maxFps !== next.maxFps;
+            const streamChanged = prev.codecPreference !== next.codecPreference;
             if (streamChanged) {
                 setReloadToken((token) => token + 1);
             }
@@ -294,8 +270,7 @@ function Monitor() {
                         settings={settings}
                         onChange={updateSettings}
                         pairing={pairing}
-                        negotiatedCodec={session.info ? session.info.codec : null}
-                        onUnpair={() => void unpair()}
+                        streamInfo={session.info}                        onUnpair={() => void unpair()}
                     />
                 </ScrollView>
             )}

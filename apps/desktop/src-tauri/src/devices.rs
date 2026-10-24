@@ -113,6 +113,11 @@ impl DeviceStore {
         self.devices.iter().find(|entry| entry.id == id)
     }
 
+    /// The device that owns this pairing secret.
+    pub fn find_by_psk(&self, psk: &str) -> Option<&DeviceEntry> {
+        self.devices.iter().find(|entry| entry.psk == psk)
+    }
+
     pub fn upsert(&mut self, entry: DeviceEntry) {
         match self
             .devices

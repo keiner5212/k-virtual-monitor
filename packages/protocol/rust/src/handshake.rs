@@ -62,20 +62,25 @@ pub async fn server_handshake<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    server_handshake_with(stream, server_name, |_| Some(psk.clone())).await
+    server_handshake_with(stream, server_name, |_| vec![psk.clone()])
+        .await
+        .map(|(keys, hello, _)| (keys, hello))
 }
 
 /// Server side of the handshake, resolving the pairing secret from the
-/// greeting. The server learns which secret to use from the device id the
-/// client presents, so the device store stays outside this package.
+/// greeting. The resolver returns the secrets that may match, in the order
+/// they should be tried: the secret of the device that is already known and
+/// the secret of the pairing code that is waiting. The first one the client
+/// can prove wins, and it is returned so the caller knows which device it is
+/// talking to. The device store stays outside this package.
 pub async fn server_handshake_with<S, F>(
     stream: &mut S,
     server_name: &str,
     mut resolve: F,
-) -> Result<(SessionKeys, Hello), ProtocolError>
+) -> Result<(SessionKeys, Hello, Psk), ProtocolError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
-    F: FnMut(&Hello) -> Option<Psk>,
+    F: FnMut(&Hello) -> Vec<Psk>,
 {
     let (header, payload) = read_message_with_limit(stream, MAX_HANDSHAKE_PAYLOAD).await?;
     if header.kind != MessageType::Hello {
@@ -91,7 +96,10 @@ where
             hello.codec_mask = codec::JPEG;
         }
     }
-    let psk = resolve(&hello).ok_or(ProtocolError::UnknownDevice(hello.device_id))?;
+    let candidates = resolve(&hello);
+    if candidates.is_empty() {
+        return Err(ProtocolError::UnknownDevice(hello.device_id));
+    }
 
     let mut server_nonce = [0u8; NONCE_LEN];
     rand::rng().fill_bytes(&mut server_nonce);
@@ -107,16 +115,23 @@ where
         return Err(ProtocolError::Handshake("expected AUTH"));
     }
     let auth = Auth::decode(&payload)?;
-    let expected = crypto::proof(
-        &psk,
-        CLIENT_PROOF_LABEL,
-        &client_transcript(&hello.client_nonce, &server_nonce, &hello.device_id),
-    );
-    if !crypto::proofs_equal(&expected, &auth.proof) {
+    let mut matched = None;
+    for candidate in &candidates {
+        let expected = crypto::proof(
+            candidate,
+            CLIENT_PROOF_LABEL,
+            &client_transcript(&hello.client_nonce, &server_nonce, &hello.device_id),
+        );
+        if crypto::proofs_equal(&expected, &auth.proof) {
+            matched = Some(candidate.clone());
+            break;
+        }
+    }
+    let Some(psk) = matched else {
         return Err(ProtocolError::ProofMismatch {
             kind: MessageType::Auth,
         });
-    }
+    };
 
     let keys = crypto::derive_session_keys(&psk, &hello.client_nonce, &server_nonce);
     let auth_ok = AuthOk {
@@ -129,7 +144,7 @@ where
     let header = Header::new(MessageType::AuthOk, 2, 0, auth_ok.encode().len());
     write_message(stream, &header, &auth_ok.encode()).await?;
 
-    Ok((keys, hello))
+    Ok((keys, hello, psk))
 }
 
 /// Client side of the handshake.

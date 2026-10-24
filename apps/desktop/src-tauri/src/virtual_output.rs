@@ -47,6 +47,12 @@ const RTLD_LAZY: i32 = 1;
 const PROT_READ: i32 = 1;
 const MAP_SHARED: i32 = 1;
 
+/// How long the last picture is repeated when the screen does not change.
+///
+/// The compositor only sends a picture when something on the screen
+/// changes. Without this the phone would wait for a frame that never comes.
+const KEEPALIVE: Duration = Duration::from_millis(500);
+
 struct ScreenOutput {
     id: i64,
     name: String,
@@ -91,9 +97,18 @@ struct Inner {
     started: Instant,
     seq: AtomicU64,
     delivered: AtomicU64,
+    /// When the last picture was handed out.
+    last_sent: Mutex<Instant>,
+    /// The size the virtual screen was last set to. The portal gives it a
+    /// size of its own, so the first resize has to happen even when the mode
+    /// did not change.
+    resized: Mutex<Option<(u16, u16)>>,
     encoder: Mutex<Option<H264Session>>,
     h264_retry: Mutex<Option<Instant>>,
     h264_down: AtomicBool,
+    /// When the last frame was produced. A screen with nothing on it produces
+    /// no frames at all.
+    last_frame: Mutex<Option<Instant>>,
 }
 
 type QuitFn = unsafe extern "C" fn(*mut std::ffi::c_void) -> i32;
@@ -117,9 +132,12 @@ impl VirtualSource {
             started: Instant::now(),
             seq: AtomicU64::new(0),
             delivered: AtomicU64::new(0),
+            last_sent: Mutex::new(Instant::now() - Duration::from_secs(1)),
+            resized: Mutex::new(None),
             encoder: Mutex::new(None),
             h264_retry: Mutex::new(None),
             h264_down: AtomicBool::new(false),
+            last_frame: Mutex::new(None),
         });
         inner.spawn();
         VirtualSource { inner }
@@ -128,13 +146,7 @@ impl VirtualSource {
 
 impl Drop for VirtualSource {
     fn drop(&mut self) {
-        self.inner.stop.store(true, Ordering::Relaxed);
-        let loop_ptr = self.inner.loop_ptr.load(Ordering::Acquire);
-        if let Some(quit) = *self.inner.quit.lock().expect("quit fn is not poisoned") {
-            if !loop_ptr.is_null() {
-                unsafe { quit(loop_ptr) };
-            }
-        }
+        self.stop();
     }
 }
 
@@ -184,21 +196,55 @@ impl FrameSource for VirtualSource {
             .expect("output is not poisoned")
             .clone()
         {
-            resize_output(&output, mode);
+            // The display is only touched when the size really changed: every
+            // change is a configuration the whole desktop sees.
+            let mut resized = self.inner.resized.lock().expect("resized is not poisoned");
+            if *resized != Some((mode.width, mode.height)) {
+                resize_output(&output, mode);
+                *resized = Some((mode.width, mode.height));
+            }
         }
     }
 
     fn status(&self) -> String {
-        self.inner
+        let stored = self
+            .inner
             .status
             .lock()
             .expect("status is not poisoned")
-            .clone()
+            .clone();
+        if !stored.starts_with("Virtual screen") {
+            return stored;
+        }
+        // The compositor only sends a picture when something on the screen
+        // changes. The last one is repeated, so the phone always has a
+        // picture, but the first one has to arrive before that.
+        let ready = self
+            .inner
+            .last_frame
+            .lock()
+            .expect("last frame is not poisoned")
+            .is_some();
+        if ready {
+            "The virtual screen is streaming.".to_string()
+        } else {
+            "Waiting for the first picture of the virtual screen.".to_string()
+        }
     }
 
     fn restart(&self) {
         self.inner.stop.store(false, Ordering::Relaxed);
         self.inner.spawn();
+    }
+
+    fn stop(&self) {
+        self.inner.stop.store(true, Ordering::Relaxed);
+        let loop_ptr = self.inner.loop_ptr.load(Ordering::Acquire);
+        if let Some(quit) = *self.inner.quit.lock().expect("quit fn is not poisoned") {
+            if !loop_ptr.is_null() {
+                unsafe { quit(loop_ptr) };
+            }
+        }
     }
 }
 
@@ -248,15 +294,19 @@ impl Inner {
             let delivered = self.delivered.load(Ordering::Relaxed);
             let guard = self.frame.lock().expect("frame slot is not poisoned");
             if let Some((seq, frame)) = guard.as_ref() {
-                if *seq != delivered {
+                let mut last_sent = self.last_sent.lock().expect("last frame is not poisoned");
+                if *seq != delivered || last_sent.elapsed() >= KEEPALIVE {
                     self.delivered.store(*seq, Ordering::Relaxed);
+                    *last_sent = Instant::now();
+                    *self.last_frame.lock().expect("last frame is not poisoned") =
+                        Some(Instant::now());
                     let frame = frame.clone();
                     return Some(frame);
                 }
             }
             let (_guard, _) = self
                 .cv
-                .wait_timeout(guard, Duration::from_millis(250))
+                .wait_timeout(guard, Duration::from_millis(100))
                 .expect("frame slot is not poisoned");
         }
     }
@@ -281,18 +331,24 @@ impl Inner {
             place_output(output, &list_outputs());
             self.set_status(format!("Virtual screen {}", output.name));
             *self.output.lock().expect("output is not poisoned") = Some(output.clone());
+            // The portal gives the new screen a size of its own, so it has to
+            // be set to the size of the stream.
+            *self.resized.lock().expect("resized is not poisoned") = None;
         } else {
             self.set_status("Virtual screen is streaming, but it is not in the display list yet");
         }
-        // The connection has to stay alive: dropping it removes the monitor.
-        let _connection = connection;
-        stream_node(self, opened.fd, opened.node)
+        let result = stream_node(self, opened.fd, opened.node);
+        // The session ends here, so the virtual screen goes away with it.
+        close_session(&connection, &opened.session);
+        result
     }
 }
 
 struct OpenedStream {
     fd: std::os::fd::OwnedFd,
     node: u32,
+    /// The portal session, so it can be closed when the capture ends.
+    session: OwnedObjectPath,
     /// The name of the output the portal created, when the portal tells it.
     output_name: Option<String>,
     /// The permission the portal gave us, so the next run does not ask again.
@@ -354,9 +410,23 @@ fn open_virtual_stream(
     Ok(OpenedStream {
         fd: fd.into(),
         node,
+        session,
         output_name,
         restore_token,
     })
+}
+
+/// Ends the portal session, so the virtual screen goes away with it.
+fn close_session(connection: &Connection, session: &OwnedObjectPath) {
+    let Ok(proxy) = SessionProxyBlocking::builder(connection)
+        .path(session.as_ref())
+        .and_then(|builder| builder.build())
+    else {
+        return;
+    };
+    if let Err(error) = proxy.close() {
+        tracing::warn!(%error, "the portal session did not close");
+    }
 }
 
 fn portal_request(
@@ -615,6 +685,15 @@ trait Request {
     fn response(&self, response: u32, results: HashMap<String, OwnedValue>) -> zbus::Result<()>;
 }
 
+#[proxy(
+    interface = "org.freedesktop.portal.Session",
+    default_service = "org.freedesktop.portal.Desktop",
+    default_path = "/org/freedesktop/portal/desktop"
+)]
+trait Session {
+    fn close(&self) -> zbus::Result<()>;
+}
+
 struct Pw {
     init: unsafe extern "C" fn(*mut i32, *mut *mut *mut i8),
     main_loop_new: unsafe extern "C" fn(*const std::ffi::c_void) -> *mut std::ffi::c_void,
@@ -644,6 +723,8 @@ struct Pw {
         unsafe extern "C" fn(*mut std::ffi::c_void, i32, u32, u32, *const *const u8, u32) -> i32,
     stream_dequeue_buffer: unsafe extern "C" fn(*mut std::ffi::c_void) -> *mut PwBuffer,
     stream_queue_buffer: unsafe extern "C" fn(*mut std::ffi::c_void, *mut PwBuffer) -> i32,
+    stream_destroy: unsafe extern "C" fn(*mut std::ffi::c_void),
+    context_destroy: unsafe extern "C" fn(*mut std::ffi::c_void),
 }
 
 #[repr(C)]
@@ -721,6 +802,8 @@ impl Pw {
                 stream_connect: sym(handle, b"pw_stream_connect\0")?,
                 stream_dequeue_buffer: sym(handle, b"pw_stream_dequeue_buffer\0")?,
                 stream_queue_buffer: sym(handle, b"pw_stream_queue_buffer\0")?,
+                stream_destroy: sym(handle, b"pw_stream_destroy\0")?,
+                context_destroy: sym(handle, b"pw_context_destroy\0")?,
             }))
         }
     }
@@ -764,6 +847,7 @@ unsafe extern "C" {
         offset: i64,
     ) -> *mut std::ffi::c_void;
     fn munmap(addr: *mut std::ffi::c_void, len: usize) -> i32;
+    fn sysconf(name: i32) -> i64;
 }
 
 fn stream_node(inner: &Arc<Inner>, fd: std::os::fd::OwnedFd, node: u32) -> Result<(), String> {
@@ -834,10 +918,25 @@ fn stream_node(inner: &Arc<Inner>, fd: std::os::fd::OwnedFd, node: u32) -> Resul
         ));
     }
     unsafe { (pw.main_loop_run)(main_loop) };
+    // The loop is over. The stream and the context go with it, so the node
+    // does not stay in the pipewire daemon after the app is gone.
+    unsafe { (pw.stream_destroy)(stream) };
+    unsafe { (pw.context_destroy)(context) };
     Ok(())
 }
 
 extern "C" fn on_state(data: *mut std::ffi::c_void, _old: i32, state: i32, error: *const i8) {
+    // A panic in a callback crosses the C boundary and kills the app, so it
+    // is caught here.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        read_state(data, state, error)
+    }));
+    if outcome.is_err() {
+        tracing::error!("the state of the virtual screen could not be read");
+    }
+}
+
+fn read_state(data: *mut std::ffi::c_void, state: i32, error: *const i8) {
     if state != -1 {
         return;
     }
@@ -855,6 +954,14 @@ extern "C" fn on_state(data: *mut std::ffi::c_void, _old: i32, state: i32, error
 }
 
 extern "C" fn on_param(data: *mut std::ffi::c_void, id: u32, param: *const u8) {
+    let outcome =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_param(data, id, param)));
+    if outcome.is_err() {
+        tracing::error!("the format of the virtual screen could not be read");
+    }
+}
+
+fn read_param(data: *mut std::ffi::c_void, id: u32, param: *const u8) {
     if id != SPA_PARAM_FORMAT || param.is_null() {
         return;
     }
@@ -865,7 +972,7 @@ extern "C" fn on_param(data: *mut std::ffi::c_void, id: u32, param: *const u8) {
                 .try_into()
                 .unwrap_or([0; 4]),
         ) as usize;
-        if size > 1_000_000 {
+        if size > 4096 {
             return;
         }
         std::slice::from_raw_parts(param, 8 + size)
@@ -879,6 +986,13 @@ extern "C" fn on_param(data: *mut std::ffi::c_void, id: u32, param: *const u8) {
 }
 
 extern "C" fn on_process(data: *mut std::ffi::c_void) {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_process(data)));
+    if outcome.is_err() {
+        tracing::error!("a frame of the virtual screen could not be read");
+    }
+}
+
+fn read_process(data: *mut std::ffi::c_void) {
     let callback = unsafe { &mut *(data as *mut CallbackState) };
     let buffer = unsafe { (callback.pw.stream_dequeue_buffer)(callback.stream) };
     if buffer.is_null() {
@@ -946,6 +1060,7 @@ fn publish(
     payload: Vec<u8>,
 ) {
     let seq = inner.seq.fetch_add(1, Ordering::Relaxed) + 1;
+    *inner.last_frame.lock().expect("last frame is not poisoned") = Some(Instant::now());
     let frame = EncodedFrame {
         header: FrameHeader {
             pts_ms: inner.started.elapsed().as_millis() as u64,
@@ -954,7 +1069,7 @@ fn publish(
             height: height as u16,
             codec: codec::wire_value(codec_bit),
         },
-        payload,
+        payload: std::sync::Arc::new(payload),
     };
     *inner.frame.lock().expect("frame slot is not poisoned") = Some((seq, frame));
     inner.cv.notify_one();
@@ -1055,45 +1170,65 @@ fn copy_frame(callback: &CallbackState, buffer: *mut PwBuffer) -> Option<(u32, u
     if need == 0 || need > 64 * 1024 * 1024 {
         return None;
     }
-    let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
-    let base = if !data.data.is_null() {
-        data.data
-    } else if data.fd >= 0 {
-        mapped = unsafe {
-            mmap(
-                std::ptr::null_mut(),
-                data.maxsize as usize,
-                PROT_READ,
-                MAP_SHARED,
-                data.fd,
-                data.mapoffset as i64,
-            )
-        };
-        if mapped.is_null() || mapped == usize::MAX as *mut std::ffi::c_void {
-            return None;
-        }
-        mapped as *mut u8
-    } else {
-        return None;
-    };
-    let offset = chunk.offset as usize;
     let available = if chunk.size == 0 {
         need
     } else {
         chunk.size as usize
     };
-    if offset.saturating_add(available) < need && chunk.size != 0 {
-        if !mapped.is_null() {
-            unsafe { munmap(mapped, data.maxsize as usize) };
-        }
+    if available < need {
+        // The frame says it is smaller than the picture it holds.
         return None;
     }
-    let bytes = unsafe { std::slice::from_raw_parts(base.add(offset), need.max(available)) };
+    let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
+    let mut mapped_len = 0usize;
+    let offset = chunk.offset as usize;
+    let base = if !data.data.is_null() {
+        data.data
+    } else if data.fd >= 0 {
+        // The buffer is a dma-buf. Its size is not in the data: a dma-buf
+        // carries no size at all, the chunk knows how much of it the picture
+        // uses. Mapping it with the size of the data maps nothing.
+        let wanted = data.mapoffset as usize + offset;
+        let page = page_size();
+        let start = wanted & !(page - 1);
+        let shift = wanted - start;
+        mapped_len = available + shift;
+        mapped = unsafe {
+            mmap(
+                std::ptr::null_mut(),
+                mapped_len,
+                PROT_READ,
+                MAP_SHARED,
+                data.fd,
+                start as i64,
+            )
+        };
+        if mapped.is_null() || mapped == usize::MAX as *mut std::ffi::c_void {
+            return None;
+        }
+        unsafe { (mapped as *mut u8).add(shift) }
+    } else {
+        return None;
+    };
+    let bytes = unsafe { std::slice::from_raw_parts(base, need) };
     let rgb = pixels_to_rgb(callback.format, bytes, width, height, stride);
     if !mapped.is_null() {
-        unsafe { munmap(mapped, data.maxsize as usize) };
+        unsafe { munmap(mapped, mapped_len) };
     }
     rgb.map(|rgb| (width, height, rgb))
+}
+
+/// The size of a memory page. The offset of a mapping has to be a multiple
+/// of it.
+fn page_size() -> usize {
+    // _SC_PAGESIZE is 30 on Linux.
+    const SC_PAGESIZE: i32 = 30;
+    let size = unsafe { sysconf(SC_PAGESIZE) };
+    if size > 0 {
+        size as usize
+    } else {
+        4096
+    }
 }
 
 fn bytes_per_pixel(format: u32) -> u32 {

@@ -29,8 +29,7 @@ against the same golden vectors so the two ends cannot drift apart.
 
 The phone client is an Expo app.
 
-Download: **TODO(keiner): add the link to the APK here once the release build
-is generated with Expo.**
+Download: [k-virtual-monitor 0.1.1 (APK)](https://drive.google.com/file/d/1S217d15_nanbk2TR3oHCfqQMdIiMTxm4/view?usp=drive_link)
 
 The app is also published from this repository:
 
@@ -46,6 +45,14 @@ it can run headless and be tested without a webview.
 pnpm install
 pnpm dev:desktop          # run the app in development
 pnpm build:desktop        # build the bundle
+```
+
+On Linux, drop the menu entries that launch a development build before
+installing the release bundle. A development build needs the dev server of
+its app and stops working once that server is gone.
+
+```bash
+scripts/linux-prepare-install.sh
 ```
 
 The headless server, useful for a machine without a desktop session:

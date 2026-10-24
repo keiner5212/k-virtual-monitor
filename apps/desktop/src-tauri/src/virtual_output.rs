@@ -296,7 +296,9 @@ fn open_virtual_stream(connection: &Connection) -> Result<OpenedStream, String> 
     let mut start = HashMap::new();
     start.insert("handle_token", Value::from(start_token.as_str()));
     // RemoteDesktop.Start with type 4 adds a monitor. ScreenCast.Start opens the share picker.
-    let started = portal_request(connection, &start_token, || remote.start(&session, "", start))?;
+    let started = portal_request(connection, &start_token, || {
+        remote.start(&session, "", start)
+    })?;
     let node = virtual_node(&started)?;
     let fd = screencast
         .open_pipe_wire_remote(&session, HashMap::new())
@@ -1283,18 +1285,17 @@ mod tests {
         assert_eq!(types.value_signature().to_string(), "u");
         assert_eq!(u32::try_from(types.clone()).unwrap(), 4);
 
-        let session = ObjectPath::try_from("/org/freedesktop/portal/desktop/session/probe").unwrap();
-        let message = zbus::message::Message::method_call(
-            "/org/freedesktop/portal/desktop",
-            "SelectSources",
-        )
-        .unwrap()
-        .destination("org.freedesktop.portal.Desktop")
-        .unwrap()
-        .interface("org.freedesktop.portal.ScreenCast")
-        .unwrap()
-        .build(&(session, &options))
-        .unwrap();
+        let session =
+            ObjectPath::try_from("/org/freedesktop/portal/desktop/session/probe").unwrap();
+        let message =
+            zbus::message::Message::method_call("/org/freedesktop/portal/desktop", "SelectSources")
+                .unwrap()
+                .destination("org.freedesktop.portal.Desktop")
+                .unwrap()
+                .interface("org.freedesktop.portal.ScreenCast")
+                .unwrap()
+                .build(&(session, &options))
+                .unwrap();
         let (_path, sent): (OwnedObjectPath, HashMap<String, OwnedValue>) =
             message.body().deserialize().unwrap();
         let sent_types = sent.get("types").expect("types");

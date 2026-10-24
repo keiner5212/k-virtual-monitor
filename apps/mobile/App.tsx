@@ -1,6 +1,7 @@
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useState } from "react";
-import { Image, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 
 import { codecFromWire, codecName } from "@kvm/protocol";
@@ -15,7 +16,18 @@ import { colors, radius, space, type } from "./src/ui";
 
 type Tab = "screen" | "settings";
 
+/** The system bars are drawn over the app, so every screen keeps clear of them. */
+const EDGES = ["top", "right", "bottom", "left"] as const;
+
 export default function App() {
+    return (
+        <SafeAreaProvider>
+            <Monitor />
+        </SafeAreaProvider>
+    );
+}
+
+function Monitor() {
     const [tab, setTab] = useState<Tab>("screen");
     const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
     const [pairing, setPairing] = useState<StoredPairing | null>(null);
@@ -67,7 +79,7 @@ export default function App() {
 
     if (!ready) {
         return (
-            <SafeAreaView style={styles.root}>
+            <SafeAreaView style={styles.root} edges={EDGES}>
                 <StatusBar style="light" />
             </SafeAreaView>
         );
@@ -75,7 +87,7 @@ export default function App() {
 
     if (!pairing) {
         return (
-            <SafeAreaView style={styles.root}>
+            <SafeAreaView style={styles.root} edges={EDGES}>
                 <StatusBar style="light" />
                 <PairScreen onPair={pair} error={pairError} />
             </SafeAreaView>
@@ -85,7 +97,7 @@ export default function App() {
     const connected = session.state === "connected";
 
     return (
-        <SafeAreaView style={styles.root}>
+        <SafeAreaView style={styles.root} edges={EDGES}>
             <StatusBar style="light" />
 
             <View style={styles.topBar}>
@@ -258,7 +270,7 @@ const styles = StyleSheet.create({
     },
     tab: {
         paddingHorizontal: space[3],
-        paddingVertical: 6,
+        paddingVertical: space[2],
         borderRadius: radius.segment,
         borderWidth: 1,
         borderColor: colors.border,
@@ -306,14 +318,14 @@ const styles = StyleSheet.create({
     },
     overlay: {
         position: "absolute",
-        top: 10,
-        left: 10,
+        top: space[2],
+        left: space[2],
         backgroundColor: "rgba(11,13,18,0.72)",
         borderRadius: radius.overlay,
         borderWidth: 1,
         borderColor: "rgba(34,40,54,0.9)",
-        paddingHorizontal: 10,
-        paddingVertical: 5,
+        paddingHorizontal: space[2],
+        paddingVertical: space[1],
     },
     overlayText: {
         color: colors.muted,

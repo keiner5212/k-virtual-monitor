@@ -9,7 +9,15 @@
 
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { useState } from "react";
-import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import {
+    Pressable,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    useWindowDimensions,
+    View,
+} from "react-native";
 
 import { decodePairingBlob, formatSafetyCode, pairingSafetyCode } from "@kvm/protocol";
 
@@ -26,6 +34,7 @@ export default function PairScreen({ onPair, error }: PairScreenProps) {
     const [manual, setManual] = useState("");
     const [busy, setBusy] = useState(false);
     const [safety, setSafety] = useState<string | null>(null);
+    const { height } = useWindowDimensions();
 
     const submit = async (blob: string) => {
         if (busy) {
@@ -49,12 +58,12 @@ export default function PairScreen({ onPair, error }: PairScreenProps) {
     };
 
     if (!permission) {
-        return <View style={styles.root} />;
+        return <View style={styles.scroll} />;
     }
 
     if (!permission.granted) {
         return (
-            <View style={styles.root}>
+            <View style={[styles.root, styles.scroll]}>
                 <Text style={type.title}>Pair a desktop</Text>
                 <Text style={[type.body, styles.explanation]}>
                     The camera reads the pairing code of the desktop. The code never leaves the local network.
@@ -72,7 +81,7 @@ export default function PairScreen({ onPair, error }: PairScreenProps) {
 
     if (safety) {
         return (
-            <View style={styles.root}>
+            <View style={[styles.root, styles.scroll]}>
                 <Text style={type.title}>Compare the code</Text>
                 <View style={styles.card} accessible accessibilityLabel={`Safety code ${safety.replace(" ", " ")}. Compare it with the code on the desktop.`}>
                     <Text style={type.uppercase}>Compare with the desktop</Text>
@@ -91,10 +100,14 @@ export default function PairScreen({ onPair, error }: PairScreenProps) {
     }
 
     return (
-        <View style={styles.root}>
+        <ScrollView
+            style={styles.scroll}
+            contentContainerStyle={styles.root}
+            keyboardShouldPersistTaps="handled"
+        >
             <Text style={type.title}>Pair a desktop</Text>
 
-            <View style={styles.scannerBox}>
+            <View style={[styles.scannerBox, { height: cameraHeight(height) }]}>
                 <CameraView
                     style={styles.camera}
                     barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
@@ -145,13 +158,20 @@ export default function PairScreen({ onPair, error }: PairScreenProps) {
                     {error}
                 </Text>
             ) : null}
-        </View>
+        </ScrollView>
     );
 }
 
+/** The scanner takes the room the screen has, without eating the rest. */
+function cameraHeight(height: number): number {
+    return Math.round(Math.min(320, Math.max(150, height * 0.42)));
+}
+
 const styles = StyleSheet.create({
-    root: {
+    scroll: {
         flex: 1,
+    },
+    root: {
         padding: space[4],
         gap: space[3],
     },
@@ -159,7 +179,6 @@ const styles = StyleSheet.create({
         color: colors.muted,
     },
     scannerBox: {
-        height: 320,
         borderRadius: radius.panel,
         borderWidth: 1,
         borderColor: colors.borderStrong,
@@ -203,7 +222,7 @@ const styles = StyleSheet.create({
     primary: {
         borderRadius: radius.control,
         backgroundColor: colors.accent,
-        paddingVertical: 13,
+        paddingVertical: space[3],
         alignItems: "center",
     },
     primaryDisabled: {
@@ -231,7 +250,7 @@ const styles = StyleSheet.create({
     },
     codeRow: {
         flexDirection: "row",
-        gap: 16,
+        gap: space[4],
     },
     code: {
         fontFamily: "monospace",

@@ -293,7 +293,7 @@ const styles = StyleSheet.create({
     },
     rowText: {
         flexShrink: 1,
-        gap: 2,
+        gap: space[1],
     },
     segmented: {
         flexDirection: "row",
@@ -328,12 +328,12 @@ const styles = StyleSheet.create({
         borderWidth: 1,
         borderRadius: radius.chip,
         paddingHorizontal: space[2],
-        paddingVertical: 3,
+        paddingVertical: space[1],
     },
     primary: {
         borderRadius: radius.control,
         backgroundColor: colors.accent,
-        paddingVertical: 13,
+        paddingVertical: space[3],
         alignItems: "center",
     },
     primaryDisabled: {

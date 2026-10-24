@@ -18,7 +18,7 @@ import {
     type AppSettings,
     type CodecPreference,
 } from "../lib/settings";
-import { Chip, colors, radius, Row, Section, Segmented, Stepper, ToggleRow, type } from "../ui";
+import { Chip, colors, radius, Row, Section, Segmented, space, Stepper, ToggleRow, type } from "../ui";
 
 interface SettingsScreenProps {
     settings: AppSettings;
@@ -213,33 +213,33 @@ function decoderNote(codec: number): string {
 
 const styles = StyleSheet.create({
     root: {
-        paddingHorizontal: 16,
-        paddingTop: 16,
-        paddingBottom: 48,
+        paddingHorizontal: space[4],
+        paddingTop: space[4],
+        paddingBottom: space[10],
     },
     detected: {
-        paddingHorizontal: 16,
-        paddingBottom: 12,
-        gap: 2,
+        paddingHorizontal: space[4],
+        paddingBottom: space[3],
+        gap: space[1],
     },
     detectedRow: {
         flexDirection: "row",
         alignItems: "center",
-        gap: 8,
+        gap: space[2],
     },
     mismatch: {
         color: colors.warn,
     },
     hintBox: {
-        paddingHorizontal: 16,
-        paddingBottom: 12,
+        paddingHorizontal: space[4],
+        paddingBottom: space[3],
     },
     empty: {
-        padding: 16,
+        padding: space[4],
     },
     dangerButton: {
-        margin: 12,
-        paddingVertical: 11,
+        margin: space[3],
+        paddingVertical: space[3],
         borderRadius: radius.control,
         borderWidth: 1,
         borderColor: colors.danger,

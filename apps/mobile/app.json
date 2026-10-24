@@ -3,6 +3,7 @@
     "name": "k-virtual-monitor",
     "slug": "k-virtual-monitor",
     "version": "0.1.0",
+    "icon": "./assets/icon.png",
     "orientation": "landscape",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#101014",
@@ -15,16 +16,31 @@
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO"
       ],
-      "edgeToEdgeEnabled": true
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#12141a"
+      }
     },
     "ios": {
       "bundleIdentifier": "dev.kvm.app"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
     },
     "plugins": [
       [
         "expo-camera",
         {
           "cameraPermission": "The camera is used to scan the pairing code of the desktop."
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 180,
+          "resizeMode": "contain",
+          "backgroundColor": "#101014"
         }
       ]
     ],

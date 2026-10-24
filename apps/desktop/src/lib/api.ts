@@ -9,6 +9,7 @@ export interface ServerStatus {
     codec: string | null;
     fps: number | null;
     deviceName: string | null;
+    capture: string;
 }
 
 export interface PairingInfo {
@@ -22,6 +23,19 @@ export interface PairingInfo {
 export interface DeviceInfo {
     id: string;
     name: string;
+    width: number;
+    height: number;
+    fps: number;
+    jpegQuality: number;
+    connected: boolean;
+}
+
+export interface DeviceSettings {
+    id: string;
+    width: number;
+    height: number;
+    fps: number;
+    jpegQuality: number;
 }
 
 export interface ServerConfig {
@@ -57,6 +71,14 @@ export function pairedDevices(): Promise<DeviceInfo[]> {
 
 export function revokeDevice(id: string): Promise<void> {
     return invoke<void>("revoke_device", { id });
+}
+
+export function saveDeviceSettings(settings: DeviceSettings): Promise<void> {
+    return invoke<void>("save_device_settings", { settings });
+}
+
+export function restartCapture(): Promise<void> {
+    return invoke<void>("restart_capture");
 }
 
 export function getConfig(): Promise<ServerConfig> {

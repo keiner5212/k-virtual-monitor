@@ -23,6 +23,7 @@ use crate::crypto::{self, Psk, SessionKeys, NONCE_LEN};
 use crate::error::ProtocolError;
 use crate::frame::{read_message_with_limit, write_message, Header, MessageType};
 use crate::limits::MAX_HANDSHAKE_PAYLOAD;
+use crate::messages::codec;
 use crate::messages::{Auth, AuthOk, Challenge, Hello};
 
 const CLIENT_PROOF_LABEL: &[u8] = b"kvm-auth-v1|c2s";
@@ -80,7 +81,16 @@ where
     if header.kind != MessageType::Hello {
         return Err(ProtocolError::Handshake("expected HELLO"));
     }
-    let hello = Hello::decode(&payload)?;
+    let mut hello = Hello::decode(&payload)?;
+    // 0x48 marks a phone that can decode H.264. Older builds only draw JPEG.
+    let bare = hello.encode().len();
+    let native_h264 = payload.len() == bare + 1 && payload.get(bare) == Some(&0x48);
+    if !native_h264 {
+        hello.codec_mask &= codec::JPEG;
+        if hello.codec_mask == 0 {
+            hello.codec_mask = codec::JPEG;
+        }
+    }
     let psk = resolve(&hello).ok_or(ProtocolError::UnknownDevice(hello.device_id))?;
 
     let mut server_nonce = [0u8; NONCE_LEN];

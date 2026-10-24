@@ -17,9 +17,11 @@ import { codecMask, type AppSettings } from "./settings";
 interface UseSessionOptions {
     pairing: StoredPairing | null;
     settings: AppSettings;
+    /** Bumped when the user changes the stream, so the phone reconnects with the new selection. */
+    reloadToken: number;
 }
 
-export function useSession({ pairing, settings }: UseSessionOptions) {
+export function useSession({ pairing, settings, reloadToken }: UseSessionOptions) {
     const [state, setState] = useState<ConnectionState>("idle");
     const [detail, setDetail] = useState<string | null>(null);
     const [info, setInfo] = useState<DisplayInfo | null>(null);
@@ -76,7 +78,7 @@ export function useSession({ pairing, settings }: UseSessionOptions) {
             clientRef.current?.stop();
             clientRef.current = null;
         };
-    }, [connect, pairing]);
+    }, [connect, pairing, reloadToken]);
 
     useEffect(() => {
         if (!client) {

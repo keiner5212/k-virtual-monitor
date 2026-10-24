@@ -43,6 +43,10 @@ async fn start() -> Fixture {
         revoked: false,
         created_at: "test".to_string(),
         expires_at: 0,
+        width: 0,
+        height: 0,
+        fps: 0,
+        jpeg_quality: 0,
     });
 
     let config = ServerConfig {

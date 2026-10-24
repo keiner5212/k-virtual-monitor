@@ -47,6 +47,18 @@ export default function SettingsScreen({
         settings.codecPreference !== "auto" &&
         detected !== codecBit(settings.codecPreference);
 
+    const resolutionOptions = RESOLUTIONS.some(
+        (option) => option.width === settings.maxWidth && option.height === settings.maxHeight,
+    )
+        ? RESOLUTIONS
+        : [
+            { label: `${settings.maxWidth} x ${settings.maxHeight}`, width: settings.maxWidth, height: settings.maxHeight },
+            ...RESOLUTIONS,
+        ];
+    const frameRates = FRAME_RATES.includes(settings.maxFps)
+        ? FRAME_RATES
+        : [...FRAME_RATES, settings.maxFps].sort((left, right) => left - right);
+
     return (
         <View style={styles.root}>
             <Section
@@ -82,26 +94,31 @@ export default function SettingsScreen({
             <Section title="Stream" hint="The largest frame and frame rate the phone accepts.">
                 <Row label="Resolution">
                     <Stepper
-                        value={settings.maxWidth}
-                        options={RESOLUTIONS.map((resolution) => resolution.width)}
-                        onChange={(maxWidth) => {
-                            const resolution = RESOLUTIONS.find((option) => option.width === maxWidth);
+                        value={settings.maxWidth * 10000 + settings.maxHeight}
+                        options={resolutionOptions.map((resolution) => resolution.width * 10000 + resolution.height)}
+                        onChange={(id) => {
                             onChange({
                                 ...settings,
-                                maxWidth,
-                                maxHeight: resolution?.height ?? settings.maxHeight,
+                                maxWidth: Math.floor(id / 10000),
+                                maxHeight: id % 10000,
                             });
                         }}
-                        format={(width) =>
-                            RESOLUTIONS.find((option) => option.width === width)?.label ?? String(width)
-                        }
+                        format={(id) => {
+                            const width = Math.floor(id / 10000);
+                            const height = id % 10000;
+                            return (
+                                resolutionOptions.find(
+                                    (option) => option.width === width && option.height === height,
+                                )?.label ?? `${width} x ${height}`
+                            );
+                        }}
                         accessibilityLabel="Resolution"
                     />
                 </Row>
                 <Row label="Frame rate">
                     <Stepper
                         value={settings.maxFps}
-                        options={FRAME_RATES}
+                        options={frameRates}
                         onChange={(maxFps) => onChange({ ...settings, maxFps })}
                         format={(fps) => `${fps} fps`}
                         accessibilityLabel="Frame rate"

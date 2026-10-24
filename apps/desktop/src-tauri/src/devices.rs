@@ -41,6 +41,18 @@ pub struct DeviceEntry {
     /// entry always has one.
     #[serde(default)]
     pub expires_at: u64,
+    /// Frame width this phone asked for. Zero means the server default.
+    #[serde(default)]
+    pub width: u16,
+    /// Frame height this phone asked for. Zero means the server default.
+    #[serde(default)]
+    pub height: u16,
+    /// Frame rate this phone asked for. Zero means the server default.
+    #[serde(default)]
+    pub fps: u16,
+    /// JPEG quality for this phone. Zero means the server default.
+    #[serde(default)]
+    pub jpeg_quality: u8,
 }
 
 impl DeviceEntry {
@@ -220,6 +232,10 @@ mod tests {
             revoked: false,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             expires_at: 0,
+            width: 0,
+            height: 0,
+            fps: 0,
+            jpeg_quality: 0,
         }
     }
 

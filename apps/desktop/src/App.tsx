@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "react-qr-code";
 
 import CountUp from "./components/react-bits/CountUp";
@@ -12,7 +12,9 @@ import {
     getConfig,
     pairedDevices,
     revokeDevice,
+    restartCapture,
     saveConfig,
+    saveDeviceSettings,
     serverStatus,
     type DeviceInfo,
     type PairingInfo,
@@ -62,6 +64,9 @@ export default function App() {
     const [now, setNow] = useState(() => Date.now());
     const [error, setError] = useState<string | null>(null);
     const [saveState, setSaveState] = useState<SaveState>("idle");
+    const [selectedId, setSelectedId] = useState<string | null>(null);
+    const [deviceDraft, setDeviceDraft] = useState<DeviceInfo | null>(null);
+    const deviceDirty = useRef(false);
 
     const refresh = useCallback(async () => {
         try {
@@ -73,14 +78,12 @@ export default function App() {
             setStatus(nextStatus);
             setDevices(nextDevices);
             setPairing((current) => {
+                if (!nextPairing) {
+                    return null;
+                }
                 if (!current) {
                     return nextPairing;
                 }
-                if (!nextPairing) {
-                    // The phone took the code, or it ran out of time.
-                    return current.expiresAt * 1000 <= Date.now() ? null : current;
-                }
-                // A newer code always expires later, so the newer one wins.
                 return nextPairing.expiresAt >= current.expiresAt ? nextPairing : current;
             });
             setError(null);
@@ -167,6 +170,43 @@ export default function App() {
         }
     }, [draft]);
 
+    useEffect(() => {
+        deviceDirty.current = false;
+    }, [selectedId]);
+
+    useEffect(() => {
+        if (deviceDirty.current) {
+            return;
+        }
+        setDeviceDraft(devices.find((device) => device.id === selectedId) ?? null);
+    }, [devices, selectedId]);
+
+    useEffect(() => {
+        if (!selectedId && devices[0]) {
+            setSelectedId(devices[0].id);
+        }
+    }, [devices, selectedId]);
+
+    const saveDevice = useCallback(async () => {
+        if (!deviceDraft) {
+            return;
+        }
+        setError(null);
+        try {
+            await saveDeviceSettings({
+                id: deviceDraft.id,
+                width: deviceDraft.width,
+                height: deviceDraft.height,
+                fps: deviceDraft.fps,
+                jpegQuality: deviceDraft.jpegQuality,
+            });
+            deviceDirty.current = false;
+            await refresh();
+        } catch (cause) {
+            setError(cause instanceof Error ? cause.message : String(cause));
+        }
+    }, [deviceDraft, refresh]);
+
     const serverName = config?.server_name ?? "k-virtual-monitor";
     const live = Boolean(status?.sessions);
     const remaining = pairing
@@ -215,6 +255,14 @@ export default function App() {
                         <p className="mt-1 font-mono text-sm text-ink-muted">
                             {status ? `${status.address}:${status.port}` : "not configured"}
                         </p>
+                        {status?.capture ? (
+                            <p className="mt-2 font-sans text-sm text-ink">{status.capture}</p>
+                        ) : null}
+                        {status?.capture.startsWith("Virtual screen was not created") ? (
+                            <button type="button" className={`${secondaryButton} mt-3`} onClick={() => void restartCapture()}>
+                                Try again
+                            </button>
+                        ) : null}
                     </div>
 
                     <div className={`grid grid-cols-2 gap-3 ${status?.running ? "" : "opacity-60"}`}>
@@ -254,10 +302,12 @@ export default function App() {
                 <section className="mx-4 mb-4 rounded-panel border border-border-subtle bg-surface-raised p-5 lg:mx-6">
                     <h2 className="font-sans text-base font-semibold text-ink">Pair a phone</h2>
                     <p className="mt-1 font-sans text-sm text-ink-muted">
-                        Scan the pairing code with the phone app, then compare the safety code on both screens.
+                        Scan the pairing code with the phone app. The six digits are a check: the phone shows the same digits after the scan. If they differ, a different device scanned the code.
                     </p>
 
-                    {pairing && !expired ? (
+                    {live ? (
+                        <p className="mt-4 font-sans text-sm text-ink">The phone is connected.</p>
+                    ) : pairing && !expired ? (
                         <div className="mt-4">
                             <SpotlightCard
                                 className="relative overflow-hidden rounded-panel border border-accent-soft bg-surface p-6 text-center"
@@ -273,7 +323,8 @@ export default function App() {
                                     <div className="rounded-lg bg-white p-3">
                                         <QRCode
                                             value={pairing.blob}
-                                            size={240}
+                                            size={336}
+                                            level="L"
                                             bgColor="#ffffff"
                                             fgColor="#0b0d12"
                                         />
@@ -281,6 +332,9 @@ export default function App() {
                                 </div>
                                 <p className="mt-5 font-sans text-xs uppercase tracking-[0.12em] text-ink-muted">
                                     Compare this code with your phone
+                                </p>
+                                <p className="mt-2 font-sans text-sm text-ink-muted">
+                                    After the scan, the phone shows these six digits. They must match. That is how you know the phone paired with this computer.
                                 </p>
                                 <p className="mt-3 font-mono text-5xl font-semibold tracking-[0.08em] text-ink">
                                     {pairing.safetyCode.split(" ").map((group, index) => (
@@ -350,16 +404,115 @@ export default function App() {
                             {devices.map((device) => (
                                 <li
                                     key={device.id}
-                                    className="flex items-center justify-between gap-3 rounded-lg border border-border-subtle bg-surface px-3 py-2"
+                                    className="rounded-lg border border-border-subtle bg-surface px-3 py-2"
                                 >
-                                    <span className="font-mono text-sm text-ink">{device.name}</span>
-                                    <button
-                                        type="button"
-                                        className={ghostButton}
-                                        onClick={() => void revoke(device.id)}
-                                    >
-                                        Revoke
-                                    </button>
+                                    <div className="flex items-center justify-between gap-3">
+                                        <button
+                                            type="button"
+                                            className="font-mono text-sm text-ink"
+                                            onClick={() => setSelectedId(device.id)}
+                                        >
+                                            {device.name}
+                                            {device.connected ? " · live" : ""}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className={ghostButton}
+                                            onClick={() => void revoke(device.id)}
+                                        >
+                                            Revoke
+                                        </button>
+                                    </div>
+                                    {deviceDraft && selectedId === device.id ? (
+                                        <div className="mt-3 grid grid-cols-1 gap-3 min-[720px]:grid-cols-2">
+                                            <div>
+                                                <span className={labelClass}>Resolution</span>
+                                                <div className="flex items-center gap-2">
+                                                    <input
+                                                        type="number"
+                                                        min={320}
+                                                        max={3840}
+                                                        aria-label="Width"
+                                                        className={inputClass}
+                                                        value={deviceDraft.width}
+                                                        onChange={(event) => {
+                                                            deviceDirty.current = true;
+                                                            setDeviceDraft({
+                                                                ...deviceDraft,
+                                                                width: Number(event.target.value) || 0,
+                                                            });
+                                                        }}
+                                                    />
+                                                    <span className="font-mono text-sm text-ink-muted">x</span>
+                                                    <input
+                                                        type="number"
+                                                        min={240}
+                                                        max={2160}
+                                                        aria-label="Height"
+                                                        className={inputClass}
+                                                        value={deviceDraft.height}
+                                                        onChange={(event) => {
+                                                            deviceDirty.current = true;
+                                                            setDeviceDraft({
+                                                                ...deviceDraft,
+                                                                height: Number(event.target.value) || 0,
+                                                            });
+                                                        }}
+                                                    />
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label className={labelClass} htmlFor={`fps-${device.id}`}>
+                                                    Frame rate
+                                                </label>
+                                                <input
+                                                    id={`fps-${device.id}`}
+                                                    type="number"
+                                                    min={1}
+                                                    max={60}
+                                                    className={inputClass}
+                                                    value={deviceDraft.fps}
+                                                    onChange={(event) => {
+                                                        deviceDirty.current = true;
+                                                        setDeviceDraft({
+                                                            ...deviceDraft,
+                                                            fps: Number(event.target.value) || 0,
+                                                        });
+                                                    }}
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className={labelClass} htmlFor={`quality-${device.id}`}>
+                                                    JPEG quality
+                                                </label>
+                                                <div className="flex items-center gap-3">
+                                                    <input
+                                                        id={`quality-${device.id}`}
+                                                        type="range"
+                                                        min={1}
+                                                        max={100}
+                                                        className="h-9 w-full accent-[var(--color-accent)]"
+                                                        value={deviceDraft.jpegQuality}
+                                                        onChange={(event) => {
+                                                            deviceDirty.current = true;
+                                                            setDeviceDraft({
+                                                                ...deviceDraft,
+                                                                jpegQuality: Number(event.target.value),
+                                                            });
+                                                        }}
+                                                    />
+                                                    <span className="w-8 text-right font-mono text-sm text-ink">
+                                                        {deviceDraft.jpegQuality}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-end">
+                                                <button type="button" className={primaryButton} onClick={() => void saveDevice()}>
+                                                    Save for this phone
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ) : null}
                                 </li>
                             ))}
                         </ul>
@@ -421,85 +574,6 @@ export default function App() {
                                 />
                             </div>
                             <div>
-                                <span className={labelClass}>Resolution</span>
-                                <div className="flex items-center gap-2">
-                                    <input
-                                        id="width"
-                                        type="number"
-                                        min={320}
-                                        max={3840}
-                                        aria-label="Width"
-                                        className={inputClass}
-                                        value={draft.width}
-                                        onChange={(event) =>
-                                            setDraft({ ...draft, width: Number(event.target.value) || 0 })
-                                        }
-                                    />
-                                    <span className="font-mono text-sm text-ink-muted">x</span>
-                                    <input
-                                        id="height"
-                                        type="number"
-                                        min={240}
-                                        max={2160}
-                                        aria-label="Height"
-                                        className={inputClass}
-                                        value={draft.height}
-                                        onChange={(event) =>
-                                            setDraft({ ...draft, height: Number(event.target.value) || 0 })
-                                        }
-                                    />
-                                </div>
-                            </div>
-                            <div>
-                                <label htmlFor="fps" className={labelClass}>
-                                    Frame rate
-                                </label>
-                                <input
-                                    id="fps"
-                                    type="number"
-                                    min={1}
-                                    max={120}
-                                    className={inputClass}
-                                    value={draft.fps}
-                                    onChange={(event) => setDraft({ ...draft, fps: Number(event.target.value) || 0 })}
-                                />
-                            </div>
-                            <div>
-                                <label htmlFor="quality" className={labelClass}>
-                                    JPEG quality
-                                </label>
-                                <div className="flex items-center gap-3">
-                                    <input
-                                        id="quality"
-                                        type="range"
-                                        min={1}
-                                        max={100}
-                                        className="h-9 w-full accent-[var(--color-accent)]"
-                                        value={draft.jpeg_quality}
-                                        onChange={(event) =>
-                                            setDraft({ ...draft, jpeg_quality: Number(event.target.value) })
-                                        }
-                                    />
-                                    <span className="w-8 text-right font-mono text-sm text-ink">
-                                        {draft.jpeg_quality}
-                                    </span>
-                                </div>
-                            </div>
-                            <div>
-                                <label htmlFor="codec" className={labelClass}>
-                                    Preferred codec
-                                </label>
-                                <select
-                                    id="codec"
-                                    className={`${inputClass} font-sans`}
-                                    value={draft.codec}
-                                    onChange={(event) => setDraft({ ...draft, codec: event.target.value })}
-                                >
-                                    <option value="h264">H.264</option>
-                                    <option value="jpeg">JPEG</option>
-                                </select>
-                            </div>
-                            <div>
                                 <label htmlFor="max-sessions" className={labelClass}>
                                     Max sessions
                                 </label>
@@ -519,7 +593,7 @@ export default function App() {
                     ) : null}
 
                     <div className="mt-4 flex items-center justify-between border-t border-border-subtle pt-4">
-                        <p className="font-sans text-xs text-ink-muted">Changes apply on restart</p>
+                        <p className="font-sans text-xs text-ink-muted">Port and name apply on restart. Screen size is per phone.</p>
                         <button
                             type="button"
                             className={primaryButton}

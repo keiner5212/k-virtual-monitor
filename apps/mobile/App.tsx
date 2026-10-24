@@ -1,14 +1,16 @@
 import { StatusBar } from "expo-status-bar";
-import { useCallback, useEffect, useState } from "react";
-import { Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { BackHandler, Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 
-import { codecFromWire, codecName } from "@kvm/protocol";
+import { Codec, codecFromWire, codecName, codecWireValue } from "@kvm/protocol";
+import { decoderAvailable, KvmVideoView, type KvmVideoRef } from "kvm-decoder";
 
 import { clearPairing, loadPairing, savePairing, type StoredPairing } from "./src/lib/pairing";
 import { ensureCsprng } from "./src/lib/random";
-import { DEFAULT_SETTINGS, loadSettings, saveSettings, type AppSettings } from "./src/lib/settings";
+import { DEFAULT_SETTINGS, loadSettings, saveSettings, setHardwareDecoder, type AppSettings } from "./src/lib/settings";
+import type { Frame } from "./src/lib/frames";
 import { useSession } from "./src/lib/useSession";
 import PairScreen from "./src/screens/PairScreen";
 import SettingsScreen from "./src/screens/SettingsScreen";
@@ -33,18 +35,22 @@ function Monitor() {
     const [pairing, setPairing] = useState<StoredPairing | null>(null);
     const [pairError, setPairError] = useState<string | null>(null);
     const [ready, setReady] = useState(false);
+    const [reloadToken, setReloadToken] = useState(0);
+    const [fullscreen, setFullscreen] = useState(false);
 
     useEffect(() => {
         void (async () => {
             ensureCsprng();
-            const [stored, storedPairing] = await Promise.all([loadSettings(), loadPairing()]);
+            setHardwareDecoder(decoderAvailable());
+            const storedPairing = await loadPairing();
+            const stored = await loadSettings(storedPairing?.deviceId ?? null);
             setSettings(stored);
             setPairing(storedPairing);
             setReady(true);
         })();
     }, []);
 
-    const session = useSession({ pairing, settings });
+    const session = useSession({ pairing, settings, reloadToken });
 
     useEffect(() => {
         if (session.state !== "connected" || !settings.keepAwake) {
@@ -58,9 +64,52 @@ function Monitor() {
     }, [session.state, settings.keepAwake]);
 
     const updateSettings = useCallback((next: AppSettings) => {
-        setSettings(next);
-        void saveSettings(next);
-    }, []);
+        setSettings((prev) => {
+            const streamChanged =
+                prev.codecPreference !== next.codecPreference ||
+                prev.maxWidth !== next.maxWidth ||
+                prev.maxHeight !== next.maxHeight ||
+                prev.maxFps !== next.maxFps;
+            if (streamChanged) {
+                setReloadToken((token) => token + 1);
+            }
+            return next;
+        });
+        if (pairing) {
+            void saveSettings(pairing.deviceId, next);
+        }
+    }, [pairing]);
+
+    useEffect(() => {
+        if (!session.info || !pairing) {
+            return;
+        }
+        const info = session.info;
+        setSettings((prev) => {
+            if (prev.maxWidth === info.width && prev.maxHeight === info.height && prev.maxFps === info.fps) {
+                return prev;
+            }
+            const next = {
+                ...prev,
+                maxWidth: info.width,
+                maxHeight: info.height,
+                maxFps: info.fps,
+            };
+            void saveSettings(pairing.deviceId, next);
+            return next;
+        });
+    }, [session.info, pairing]);
+
+    useEffect(() => {
+        if (!fullscreen) {
+            return;
+        }
+        const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+            setFullscreen(false);
+            return true;
+        });
+        return () => subscription.remove();
+    }, [fullscreen]);
 
     const pair = useCallback(async (blob: string) => {
         setPairError(null);
@@ -71,6 +120,24 @@ function Monitor() {
             throw cause;
         }
     }, []);
+
+    const h264Fallback = useRef(false);
+    const settingsRef = useRef(settings);
+    settingsRef.current = settings;
+    const failH264 = useCallback(() => {
+        const prev = settingsRef.current;
+        if (h264Fallback.current || prev.codecPreference === "jpeg") {
+            return;
+        }
+        h264Fallback.current = true;
+        updateSettings({ ...prev, codecPreference: "jpeg" });
+    }, [updateSettings]);
+
+    useEffect(() => {
+        if (settings.codecPreference === "h264" || settings.codecPreference === "auto") {
+            h264Fallback.current = false;
+        }
+    }, [settings.codecPreference]);
 
     const unpair = useCallback(async () => {
         await clearPairing();
@@ -97,18 +164,20 @@ function Monitor() {
     const connected = session.state === "connected";
 
     return (
-        <SafeAreaView style={styles.root} edges={EDGES}>
-            <StatusBar style="light" />
+        <SafeAreaView style={styles.root} edges={fullscreen ? [] : EDGES}>
+            <StatusBar style="light" hidden={fullscreen} />
 
-            <View style={styles.topBar}>
-                <ConnectionPill state={session.state} name={pairing.serverName} />
-                <View style={styles.tabs}>
-                    <TabButton label="Screen" active={tab === "screen"} onPress={() => setTab("screen")} />
-                    <TabButton label="Settings" active={tab === "settings"} onPress={() => setTab("settings")} />
+            {fullscreen ? null : (
+                <View style={styles.topBar}>
+                    <ConnectionPill state={session.state} name={pairing.serverName} />
+                    <View style={styles.tabs}>
+                        <TabButton label="Screen" active={tab === "screen"} onPress={() => setTab("screen")} />
+                        <TabButton label="Settings" active={tab === "settings"} onPress={() => setTab("settings")} />
+                    </View>
                 </View>
-            </View>
+            )}
 
-            {!connected && session.state !== "idle" ? (
+            {!fullscreen && !connected && session.state !== "idle" ? (
                 <View style={styles.banner} accessibilityLiveRegion="polite">
                     <Text style={styles.bannerText}>
                         {session.state === "error"
@@ -123,11 +192,7 @@ function Monitor() {
             {tab === "screen" ? (
                 <View style={styles.stage}>
                     {connected && session.frame ? (
-                        <Image
-                            style={styles.picture}
-                            source={{ uri: `data:image/jpeg;base64,${toBase64(session.frame.data)}` }}
-                            resizeMode="contain"
-                        />
+                        <Picture frame={session.frame} onH264Failed={failH264} />
                     ) : (
                         <View style={styles.stateBlock}>
                             <Text style={type.title}>{stateTitle(session.state)}</Text>
@@ -140,7 +205,7 @@ function Monitor() {
                         </View>
                     )}
 
-                    {settings.showStats && session.info ? (
+                    {settings.showStats && session.info && !fullscreen ? (
                         <View style={styles.overlay}>
                             <Text
                                 style={styles.overlayText}
@@ -152,6 +217,17 @@ function Monitor() {
                             </Text>
                         </View>
                     ) : null}
+
+                    {fullscreen ? null : (
+                        <Pressable
+                            accessibilityRole="button"
+                            accessibilityLabel="Full screen"
+                            style={styles.fullButton}
+                            onPress={() => setFullscreen(true)}
+                        >
+                            <Text style={styles.fullLabel}>Full screen</Text>
+                        </Pressable>
+                    )}
                 </View>
             ) : (
                 <ScrollView style={styles.scroll}>
@@ -204,6 +280,45 @@ function TabButton({
             <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>{label}</Text>
         </Pressable>
     );
+}
+
+const H264_WIRE = codecWireValue(Codec.H264);
+const JPEG_WIRE = codecWireValue(Codec.JPEG);
+
+function Picture({ frame, onH264Failed }: { frame: Frame; onH264Failed: () => void }) {
+    const video = useRef<KvmVideoRef>(null);
+    const h264 = frame.codec === H264_WIRE;
+
+    useEffect(() => {
+        if (!h264) {
+            return;
+        }
+        if (!decoderAvailable()) {
+            onH264Failed();
+            return;
+        }
+        const view = video.current;
+        if (!view) {
+            return;
+        }
+        void view.pushFrame(toBase64(frame.data), frame.keyframe, frame.width, frame.height).catch(() => {
+            onH264Failed();
+        });
+    }, [frame, h264, onH264Failed]);
+
+    if (h264 && decoderAvailable()) {
+        return <KvmVideoView ref={video} style={styles.picture} onDecodeError={() => onH264Failed()} />;
+    }
+    if (frame.codec === JPEG_WIRE) {
+        return (
+            <Image
+                style={styles.picture}
+                source={{ uri: `data:image/jpeg;base64,${toBase64(frame.data)}` }}
+                resizeMode="contain"
+            />
+        );
+    }
+    return null;
 }
 
 /** The codec of the live session, from the wire value the server sent. */
@@ -333,6 +448,22 @@ const styles = StyleSheet.create({
         fontSize: 11,
         lineHeight: 14,
         fontVariant: ["tabular-nums"],
+    },
+    fullButton: {
+        position: "absolute",
+        top: space[2],
+        right: space[2],
+        backgroundColor: "rgba(11,13,18,0.72)",
+        borderRadius: radius.overlay,
+        borderWidth: 1,
+        borderColor: "rgba(34,40,54,0.9)",
+        paddingHorizontal: space[3],
+        paddingVertical: space[2],
+    },
+    fullLabel: {
+        color: colors.ink,
+        fontSize: 13,
+        fontWeight: "600",
     },
     scroll: {
         flex: 1,

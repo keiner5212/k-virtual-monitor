@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 
 use crate::config::ServerConfig;
 use crate::devices::{hex, unhex, unix_now, DeviceStore};
-use crate::source::{EncodedFrame, FrameSource};
+use crate::source::{EncodedFrame, FrameSource, StreamMode};
 
 /// What the live session is doing, for the user interface.
 #[derive(Debug, Clone, Default)]
@@ -44,6 +44,7 @@ pub struct Server {
     sessions: Arc<AtomicUsize>,
     pending: Arc<AtomicUsize>,
     session_info: Arc<Mutex<Option<SessionInfo>>>,
+    active_device: Arc<Mutex<Option<String>>>,
 }
 
 impl Server {
@@ -61,6 +62,7 @@ impl Server {
             sessions: Arc::new(AtomicUsize::new(0)),
             pending: Arc::new(AtomicUsize::new(0)),
             session_info: Arc::new(Mutex::new(None)),
+            active_device: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -79,6 +81,29 @@ impl Server {
     /// What the live session is doing, if there is one.
     pub fn session_info(&self) -> Option<SessionInfo> {
         self.session_info.lock().ok().and_then(|info| info.clone())
+    }
+
+    /// The paired device that owns the live session.
+    pub fn active_device(&self) -> Option<String> {
+        self.active_device.lock().ok().and_then(|id| id.clone())
+    }
+
+    /// What the capture wants the user to know.
+    pub fn capture_status(&self) -> String {
+        self.source.status()
+    }
+
+    /// Applies a size change when this device is the one on the virtual screen.
+    pub fn apply_if_active(&self, id: &str, mode: StreamMode) {
+        let active = self.active_device();
+        if active.as_deref() == Some(id) {
+            self.source.set_mode(mode);
+        }
+    }
+
+    /// Opens the share dialog again after the user cancelled it.
+    pub fn restart_capture(&self) {
+        self.source.restart();
     }
 
     /// Binds the listener. The port may be zero, in which case the system
@@ -187,9 +212,14 @@ impl Server {
                 tracing::info!(%peer, device = %entry.name, "the device was revoked");
                 return;
             }
+            let mode = mode_for(&hello, &self.config, entry.jpeg_quality);
             let mut updated = entry.clone();
             updated.name = hello.device_name.clone();
             updated.paired = true;
+            updated.width = mode.width;
+            updated.height = mode.height;
+            updated.fps = mode.fps;
+            updated.jpeg_quality = mode.quality;
             let changed = updated != entry;
             store.upsert(updated.clone());
             if changed {
@@ -199,11 +229,13 @@ impl Server {
             }
             updated
         };
-
+        let mut mode = mode_for(&hello, &self.config, entry.jpeg_quality);
         let Some(codec) = codec::negotiate(hello.codec_mask, self.source.codecs()) else {
             tracing::info!(%peer, "the client cannot decode any codec we produce");
             return;
         };
+        mode.codec = codec;
+        self.source.set_mode(mode);
 
         if !self.reserve_session() {
             tracing::warn!(%peer, "the server is full, refusing the session");
@@ -216,9 +248,17 @@ impl Server {
             codec = codec::name(codec),
             "session started"
         );
+        if let Ok(mut active) = self.active_device.lock() {
+            *active = Some(entry.id.clone());
+        }
         let result = self
             .run_session(stream, keys, entry.caps, codec, entry.name.clone())
             .await;
+        if let Ok(mut active) = self.active_device.lock() {
+            if active.as_deref() == Some(entry.id.as_str()) {
+                *active = None;
+            }
+        }
         self.sessions.fetch_sub(1, Ordering::Relaxed);
         if let Ok(mut info) = self.session_info.lock() {
             *info = None;
@@ -252,21 +292,9 @@ impl Server {
         let mut session = Session::server(keys);
         let mut window = SendWindow::default();
 
-        let info = DisplayInfo {
-            width: self.config.width,
-            height: self.config.height,
-            fps: self.config.fps,
-            codec: codec::wire_value(codec),
-            granted_caps,
-            server_name: self.config.server_name.clone(),
-        };
-        let payload = info.encode();
-        let (header, sealed) = session
-            .seal(MessageType::DisplayInfo, 0, &payload)
-            .map_err(|error| error.to_string())?;
-        write_message(&mut stream, &header, &sealed)
-            .await
-            .map_err(|error| error.to_string())?;
+        let mut sent_mode = self.source.mode();
+        self.write_display_info(&mut stream, &mut session, sent_mode, granted_caps, codec)
+            .await?;
 
         let mut frames_sent = 0u64;
         let mut frames_this_second = 0u64;
@@ -308,11 +336,15 @@ impl Server {
         let result = async {
             let idle = Duration::from_secs(self.config.session_idle_timeout_secs);
             let mut idle_deadline = tokio::time::Instant::now() + idle;
+            let mut mode_tick = tokio::time::interval(Duration::from_millis(400));
+            mode_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            mode_tick.tick().await;
             loop {
                 enum Event {
                     Message(Option<(Header, Vec<u8>)>),
                     Frame(Option<EncodedFrame>),
                     Idle,
+                    Mode,
                 }
 
                 let event = if window.in_flight_frames() >= window.max_frames() {
@@ -320,12 +352,14 @@ impl Server {
                     // frame to drop.
                     tokio::select! {
                         message = message_rx.recv() => Event::Message(message),
+                        _ = mode_tick.tick() => Event::Mode,
                         _ = tokio::time::sleep_until(idle_deadline) => Event::Idle,
                     }
                 } else {
                     tokio::select! {
                         message = message_rx.recv() => Event::Message(message),
                         frame = frame_rx.recv() => Event::Frame(frame),
+                        _ = mode_tick.tick() => Event::Mode,
                         _ = tokio::time::sleep_until(idle_deadline) => Event::Idle,
                     }
                 };
@@ -358,6 +392,20 @@ impl Server {
                         }
                     }
                     Event::Frame(None) => return Ok(()),
+                    Event::Mode => {
+                        let mode = self.source.mode();
+                        if mode != sent_mode {
+                            self.write_display_info(
+                                &mut writer,
+                                &mut session,
+                                mode,
+                                granted_caps,
+                                codec,
+                            )
+                            .await?;
+                            sent_mode = mode;
+                        }
+                    }
                     Event::Idle => return Err("the session was idle".to_string()),
                 }
 
@@ -381,6 +429,31 @@ impl Server {
         reader_task.abort();
         let _ = writer.shutdown().await;
         result
+    }
+
+    async fn write_display_info<W: AsyncWrite + Unpin>(
+        &self,
+        stream: &mut W,
+        session: &mut Session,
+        mode: StreamMode,
+        granted_caps: u8,
+        codec_bit: u16,
+    ) -> Result<(), String> {
+        let info = DisplayInfo {
+            width: mode.width,
+            height: mode.height,
+            fps: mode.fps,
+            codec: codec::wire_value(codec_bit),
+            granted_caps,
+            server_name: self.config.server_name.clone(),
+        };
+        let payload = info.encode();
+        let (header, sealed) = session
+            .seal(MessageType::DisplayInfo, 0, &payload)
+            .map_err(|error| error.to_string())?;
+        write_message(stream, &header, &sealed)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     /// Handles one message from the client.
@@ -462,4 +535,36 @@ impl Server {
             .map_err(|error| error.to_string())?;
         Ok(true)
     }
+}
+
+/// The phone's selection, kept inside what the virtual screen can show.
+fn mode_for(hello: &Hello, config: &ServerConfig, quality: u8) -> StreamMode {
+    let width = if (320..=3840).contains(&hello.max_width) {
+        hello.max_width
+    } else {
+        config.width
+    };
+    let height = if (240..=2160).contains(&hello.max_height) {
+        hello.max_height
+    } else {
+        config.height
+    };
+    let fps = if hello.max_fps == 0 {
+        config.fps
+    } else {
+        hello.max_fps
+    };
+    let quality = if quality == 0 {
+        config.jpeg_quality
+    } else {
+        quality
+    };
+    StreamMode {
+        width,
+        height,
+        fps,
+        quality,
+        codec: 0,
+    }
+    .normalize()
 }

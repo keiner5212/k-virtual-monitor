@@ -33,6 +33,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 rand = "0.9"
+zbus = { version = "5", features = ["blocking"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

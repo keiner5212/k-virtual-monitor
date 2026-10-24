@@ -90,7 +90,11 @@ export async function clientHandshake(
     psk: Psk,
     hello: Hello,
 ): Promise<SessionKeys> {
-    const payload = encodeHello(hello);
+    const encoded = encodeHello(hello);
+    // 0x48 tells the server this build can decode H.264.
+    const payload = new Uint8Array(encoded.length + 1);
+    payload.set(encoded);
+    payload[encoded.length] = 0x48;
     channel.send(
         { version: 1, type: MessageType.Hello, flags: 0, seq: 1, payloadLen: payload.length },
         payload,

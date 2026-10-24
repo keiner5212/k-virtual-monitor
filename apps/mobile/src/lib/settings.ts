@@ -42,9 +42,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
 
 const STORAGE_KEY = "kvm.settings.v1";
 
-export async function loadSettings(): Promise<AppSettings> {
+function storageKey(deviceId: string): string {
+    return `${STORAGE_KEY}.${deviceId}`;
+}
+
+export async function loadSettings(deviceId: string | null): Promise<AppSettings> {
     try {
-        const raw = await AsyncStorage.getItem(STORAGE_KEY);
+        const raw = deviceId
+            ? (await AsyncStorage.getItem(storageKey(deviceId))) ?? (await AsyncStorage.getItem(STORAGE_KEY))
+            : await AsyncStorage.getItem(STORAGE_KEY);
         if (!raw) {
             return DEFAULT_SETTINGS;
         }
@@ -55,23 +61,32 @@ export async function loadSettings(): Promise<AppSettings> {
     }
 }
 
-export async function saveSettings(settings: AppSettings): Promise<void> {
-    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+export async function saveSettings(deviceId: string, settings: AppSettings): Promise<void> {
+    await AsyncStorage.setItem(storageKey(deviceId), JSON.stringify(settings));
+}
+
+/** False when this build has no H.264 decoder. JPEG is still compressed. */
+let hardwareDecoder = true;
+
+export function setHardwareDecoder(ready: boolean): void {
+    hardwareDecoder = ready;
 }
 
 /**
  * The codecs the phone asks for.
  *
- * The phone decodes H.264 and H.265 with the hardware decoder, so both are
- * offered. JPEG is the fallback for the devices without a working hardware
- * decoder, and it is the only one that always works.
+ * H.264 is preferred. JPEG is always included, so a tablet that cannot decode
+ * H.264, or a desktop without the encoder, still gets a compressed stream.
  */
 export function codecMask(preference: CodecPreference): number {
+    if (!hardwareDecoder) {
+        return Codec.JPEG;
+    }
     switch (preference) {
         case "h264":
-            return Codec.H264;
+            return Codec.H264 | Codec.JPEG;
         case "h265":
-            return Codec.H265;
+            return Codec.H265 | Codec.H264 | Codec.JPEG;
         case "jpeg":
             return Codec.JPEG;
         case "auto":
@@ -89,6 +104,7 @@ export const CODEC_PREFERENCES: Array<{ value: CodecPreference; label: string; h
 
 export const RESOLUTIONS: Array<{ label: string; width: number; height: number }> = [
     { label: "1920 x 1200", width: 1920, height: 1200 },
+    { label: "1920 x 1080", width: 1920, height: 1080 },
     { label: "1408 x 792", width: 1408, height: 792 },
     { label: "1280 x 720", width: 1280, height: 720 },
 ];

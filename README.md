@@ -29,7 +29,7 @@ against the same golden vectors so the two ends cannot drift apart.
 
 The phone client is an Expo app.
 
-Download: [k-virtual-monitor 0.1.1 (APK)](https://drive.google.com/file/d/1S217d15_nanbk2TR3oHCfqQMdIiMTxm4/view?usp=drive_link)
+Download: [k-virtual-monitor (APK)](https://drive.google.com/file/d/1S217d15_nanbk2TR3oHCfqQMdIiMTxm4/view?usp=drive_link)
 
 The app is also published from this repository:
 

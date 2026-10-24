@@ -1,0 +1,10 @@
+apply plugin: 'expo-module-gradle-plugin'
+
+android {
+  namespace "expo.modules.kvmdecoder"
+
+  defaultConfig {
+    versionName "0.1.0"
+    versionCode 1
+  }
+}

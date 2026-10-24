@@ -1,0 +1,2 @@
+[env]
+CARGO_TARGET_DIR = { value = ".tmp/target", relative = true }

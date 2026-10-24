@@ -6,8 +6,10 @@
 
 pub mod config;
 pub mod devices;
+mod h264;
 pub mod server;
 pub mod source;
+mod virtual_output;
 
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
@@ -21,7 +23,8 @@ use tauri::State;
 use crate::config::ServerConfig;
 use crate::devices::{hex, unhex, unix_now, DeviceEntry, DeviceStore, CAP_CONTROL, CAP_VIEW};
 use crate::server::Server;
-use crate::source::{FrameSource, SyntheticSource};
+use crate::source::{FrameSource, StreamMode, SyntheticSource};
+use crate::virtual_output::VirtualSource;
 
 /// How long a pairing code stays valid.
 const PAIRING_TTL_SECONDS: u64 = 300;
@@ -47,6 +50,7 @@ pub struct ServerStatus {
     codec: Option<String>,
     fps: Option<u16>,
     device_name: Option<String>,
+    capture: String,
 }
 
 #[derive(serde::Serialize)]
@@ -54,6 +58,11 @@ pub struct ServerStatus {
 pub struct DeviceInfo {
     id: String,
     name: String,
+    width: u16,
+    height: u16,
+    fps: u16,
+    jpeg_quality: u8,
+    connected: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -84,6 +93,7 @@ fn server_status(state: State<'_, AppState>) -> ServerStatus {
             .map(|info| kvm_protocol::messages::codec::name(info.codec).to_uppercase()),
         fps: session.as_ref().map(|info| info.fps),
         device_name: session.map(|info| info.device_name),
+        capture: state.server.capture_status(),
     }
 }
 
@@ -147,6 +157,10 @@ fn create_pairing_entry(
         revoked: false,
         created_at: now_stamp(),
         expires_at: now + PAIRING_TTL_SECONDS,
+        width: 0,
+        height: 0,
+        fps: 0,
+        jpeg_quality: 0,
     };
 
     store.upsert(entry.clone());
@@ -179,6 +193,23 @@ fn paired_devices(state: State<'_, AppState>) -> Vec<DeviceInfo> {
         .map(|entry| DeviceInfo {
             id: entry.id.clone(),
             name: entry.name.clone(),
+            width: if entry.width == 0 {
+                state.config.width
+            } else {
+                entry.width
+            },
+            height: if entry.height == 0 {
+                state.config.height
+            } else {
+                entry.height
+            },
+            fps: if entry.fps == 0 { state.config.fps } else { entry.fps },
+            jpeg_quality: if entry.jpeg_quality == 0 {
+                state.config.jpeg_quality
+            } else {
+                entry.jpeg_quality
+            },
+            connected: state.server.active_device().as_deref() == Some(entry.id.as_str()),
         })
         .collect()
 }
@@ -195,6 +226,61 @@ fn revoke_device(state: State<'_, AppState>, id: String) -> Result<(), String> {
     store
         .save(&state.store_path)
         .map_err(|error| error.to_string())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceSettings {
+    id: String,
+    width: u16,
+    height: u16,
+    fps: u16,
+    jpeg_quality: u8,
+}
+
+/// Stores the stream settings of one phone and resizes its virtual screen
+/// when that phone is connected.
+#[tauri::command]
+fn save_device_settings(state: State<'_, AppState>, settings: DeviceSettings) -> Result<(), String> {
+    let mode = StreamMode {
+        width: settings.width,
+        height: settings.height,
+        fps: settings.fps,
+        quality: settings.jpeg_quality,
+        codec: 0,
+    }
+    .normalize();
+    let mut store = state.store.lock().expect("store is not poisoned");
+    refresh(&mut store, &state.store_path);
+    let Some(mut entry) = store.find(&settings.id).cloned() else {
+        return Err("no such device".to_string());
+    };
+    entry.width = mode.width;
+    entry.height = mode.height;
+    entry.fps = mode.fps;
+    entry.jpeg_quality = mode.quality;
+    store.upsert(entry);
+    store
+        .save(&state.store_path)
+        .map_err(|error| error.to_string())?;
+    drop(store);
+    state.server.apply_if_active(
+        &settings.id,
+        StreamMode {
+            width: mode.width,
+            height: mode.height,
+            fps: mode.fps,
+            quality: mode.quality,
+            codec: 0,
+        },
+    );
+    Ok(())
+}
+
+/// Opens the share dialog again after it was cancelled.
+#[tauri::command]
+fn restart_capture(state: State<'_, AppState>) {
+    state.server.restart_capture();
 }
 
 /// Builds the server and the state the commands need. The server and the
@@ -222,13 +308,22 @@ pub fn build_state(
     (state, server)
 }
 
-/// The default frame source, until the portal capture lands.
+/// The frame source. A Wayland session gets a real virtual screen. Without
+/// one, the synthetic pattern keeps the protocol tests and headless runs working.
 pub fn default_source(config: &ServerConfig) -> Arc<dyn FrameSource> {
-    Arc::new(SyntheticSource::new(
-        config.width,
-        config.height,
-        config.jpeg_quality,
-    ))
+    let mode = StreamMode {
+        width: config.width,
+        height: config.height,
+        fps: config.fps,
+        quality: config.jpeg_quality,
+        codec: kvm_protocol::messages::codec::JPEG,
+    }
+    .normalize();
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var_os("KVM_SYNTHETIC").is_none() {
+        Arc::new(VirtualSource::start(mode))
+    } else {
+        Arc::new(SyntheticSource::new(mode.width, mode.height, mode.quality))
+    }
 }
 
 pub fn run() {
@@ -260,7 +355,9 @@ pub fn run() {
             paired_devices,
             revoke_device,
             get_config,
-            save_config
+            save_config,
+            save_device_settings,
+            restart_capture
         ])
         .run(tauri::generate_context!())
         .expect("cannot start the application");

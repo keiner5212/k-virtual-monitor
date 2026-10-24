@@ -8,7 +8,7 @@
  */
 
 import { CameraView, useCameraPermissions } from "expo-camera";
-import { useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
     Pressable,
     ScrollView,
@@ -30,31 +30,48 @@ interface PairScreenProps {
 
 export default function PairScreen({ onPair, error }: PairScreenProps) {
     const [permission, requestPermission] = useCameraPermissions();
-    const [scanned, setScanned] = useState(false);
     const [manual, setManual] = useState("");
     const [busy, setBusy] = useState(false);
     const [safety, setSafety] = useState<string | null>(null);
+    const [pending, setPending] = useState<string | null>(null);
+    const [localError, setLocalError] = useState<string | null>(null);
+    const lock = useRef(false);
     const { height } = useWindowDimensions();
+    const barcodeSettings = useMemo(() => ({ barcodeTypes: ["qr" as const] }), []);
 
-    const submit = async (blob: string) => {
-        if (busy) {
+    const stage = (blob: string) => {
+        const trimmed = blob.trim();
+        try {
+            setSafety(formatSafetyCode(pairingSafetyCode(decodePairingBlob(trimmed))));
+            setPending(trimmed);
+            setLocalError(null);
+        } catch {
+            lock.current = false;
+            setSafety(null);
+            setPending(null);
+            setLocalError("That is not a pairing code. Point the camera at the code on the desktop.");
+        }
+    };
+
+    const confirm = async () => {
+        if (!pending || busy) {
             return;
         }
         setBusy(true);
         try {
-            // The safety code comes from the secret inside the code, so it can be
-            // shown before the connection is even established.
-            try {
-                setSafety(formatSafetyCode(pairingSafetyCode(decodePairingBlob(blob.trim()))));
-            } catch {
-                setSafety(null);
-            }
-            await onPair(blob);
+            await onPair(pending);
         } catch {
             // The error is shown by the caller.
         } finally {
             setBusy(false);
         }
+    };
+
+    const scanAgain = () => {
+        lock.current = false;
+        setSafety(null);
+        setPending(null);
+        setLocalError(null);
     };
 
     if (!permission) {
@@ -79,12 +96,12 @@ export default function PairScreen({ onPair, error }: PairScreenProps) {
         );
     }
 
-    if (safety) {
+    if (safety && pending) {
         return (
             <View style={[styles.root, styles.scroll]}>
                 <Text style={type.title}>Compare the code</Text>
-                <View style={styles.card} accessible accessibilityLabel={`Safety code ${safety.replace(" ", " ")}. Compare it with the code on the desktop.`}>
-                    <Text style={type.uppercase}>Compare with the desktop</Text>
+                <View style={styles.card} accessible accessibilityLabel={`Safety code ${safety}. Compare it with the code on the desktop.`}>
+                    <Text style={type.uppercase}>Compare this code with your phone</Text>
                     <View style={styles.codeRow}>
                         {safety.split(" ").map((group) => (
                             <Text key={group} style={styles.code}>
@@ -92,84 +109,111 @@ export default function PairScreen({ onPair, error }: PairScreenProps) {
                             </Text>
                         ))}
                     </View>
-                    <Text style={type.body}>The two codes must match.</Text>
-                    <Text style={type.caption}>If they do not, stop and scan again.</Text>
+                    <Text style={type.body}>These six digits must match the desktop.</Text>
+                    <Text style={type.caption}>
+                        They prove this phone paired with that computer. If they differ, scan again.
+                    </Text>
                 </View>
+                <Pressable
+                    accessibilityRole="button"
+                    style={[styles.primary, busy && styles.primaryDisabled]}
+                    onPress={() => void confirm()}
+                    disabled={busy}
+                >
+                    <Text style={styles.primaryLabel}>{busy ? "Pairing..." : "Codes match"}</Text>
+                </Pressable>
+                <Pressable accessibilityRole="button" style={styles.secondary} onPress={scanAgain}>
+                    <Text style={styles.secondaryLabel}>Scan again</Text>
+                </Pressable>
+                {error ? (
+                    <Text accessibilityLiveRegion="assertive" style={styles.error}>
+                        {error}
+                    </Text>
+                ) : null}
             </View>
         );
     }
 
     return (
-        <ScrollView
-            style={styles.scroll}
-            contentContainerStyle={styles.root}
-            keyboardShouldPersistTaps="handled"
-        >
+        <View style={styles.screen}>
             <Text style={type.title}>Pair a desktop</Text>
-
             <View style={[styles.scannerBox, { height: cameraHeight(height) }]}>
                 <CameraView
                     style={styles.camera}
-                    barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
-                    onBarcodeScanned={
-                        scanned
-                            ? undefined
-                            : (result) => {
-                                setScanned(true);
-                                void submit(result.data);
-                            }
-                    }
+                    facing="back"
+                    autofocus="on"
+                    barcodeScannerSettings={barcodeSettings}
+                    onBarcodeScanned={(result) => {
+                        if (lock.current) {
+                            return;
+                        }
+                        const data = result.data?.trim();
+                        if (!data) {
+                            return;
+                        }
+                        lock.current = true;
+                        stage(data);
+                    }}
                 />
                 <View pointerEvents="none" style={styles.reticle} />
             </View>
             <Text style={[type.caption, styles.hint]}>Point the camera at the QR code on the desktop</Text>
-
-            <Text style={[type.bodyStrong, styles.label]}>Pairing code</Text>
-            <TextInput
-                accessibilityLabel="Pairing code"
-                accessibilityHint="Paste the code shown on the desktop"
-                style={styles.input}
-                value={manual}
-                onChangeText={setManual}
-                placeholder="kvm1:..."
-                placeholderTextColor={colors.muted}
-                autoCapitalize="none"
-                autoCorrect={false}
-                autoComplete="off"
-                spellCheck={false}
-                multiline
-            />
-            <Text style={type.caption}>
-                Open the desktop app, choose Pair a phone, and copy the code.
-            </Text>
-
-            <Pressable
-                accessibilityRole="button"
-                accessibilityState={{ disabled: !manual.trim() || busy }}
-                style={[styles.primary, (!manual.trim() || busy) && styles.primaryDisabled]}
-                onPress={() => void submit(manual)}
-                disabled={!manual.trim() || busy}
+            <ScrollView
+                style={styles.scroll}
+                contentContainerStyle={styles.manual}
+                keyboardShouldPersistTaps="handled"
             >
-                <Text style={styles.primaryLabel}>{busy ? "Pairing..." : "Pair"}</Text>
-            </Pressable>
-
-            {error ? (
-                <Text accessibilityLiveRegion="assertive" style={styles.error}>
-                    {error}
-                </Text>
-            ) : null}
-        </ScrollView>
+                <Text style={type.bodyStrong}>Pairing code</Text>
+                <TextInput
+                    accessibilityLabel="Pairing code"
+                    accessibilityHint="Paste the code shown on the desktop"
+                    style={styles.input}
+                    value={manual}
+                    onChangeText={setManual}
+                    placeholder="kvm1:..."
+                    placeholderTextColor={colors.muted}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    autoComplete="off"
+                    spellCheck={false}
+                    multiline
+                />
+                <Pressable
+                    accessibilityRole="button"
+                    accessibilityState={{ disabled: !manual.trim() || busy }}
+                    style={[styles.primary, (!manual.trim() || busy) && styles.primaryDisabled]}
+                    onPress={() => stage(manual)}
+                    disabled={!manual.trim() || busy}
+                >
+                    <Text style={styles.primaryLabel}>Pair</Text>
+                </Pressable>
+                {localError || error ? (
+                    <Text accessibilityLiveRegion="assertive" style={styles.error}>
+                        {localError ?? error}
+                    </Text>
+                ) : null}
+            </ScrollView>
+        </View>
     );
 }
 
 /** The scanner takes the room the screen has, without eating the rest. */
 function cameraHeight(height: number): number {
-    return Math.round(Math.min(320, Math.max(150, height * 0.42)));
+    return Math.round(Math.min(420, Math.max(220, height * 0.46)));
 }
 
 const styles = StyleSheet.create({
     scroll: {
         flex: 1,
+    },
+    screen: {
+        flex: 1,
+        padding: space[4],
+        gap: space[3],
+    },
+    manual: {
+        gap: space[3],
+        paddingBottom: space[6],
     },
     root: {
         padding: space[4],
@@ -227,6 +271,18 @@ const styles = StyleSheet.create({
     },
     primaryDisabled: {
         opacity: 0.5,
+    },
+    secondary: {
+        borderRadius: radius.control,
+        borderWidth: 1,
+        borderColor: colors.borderStrong,
+        paddingVertical: space[3],
+        alignItems: "center",
+    },
+    secondaryLabel: {
+        color: colors.ink,
+        fontSize: 15,
+        fontWeight: "600",
     },
     primaryLabel: {
         color: colors.surface,

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import QRCode from "react-qr-code";
 
 import CountUp from "./components/react-bits/CountUp";
 import SplitText from "./components/react-bits/SplitText";
@@ -266,6 +267,19 @@ export default function App() {
                                 intensity={0.5}
                             >
                                 <p className="font-sans text-xs uppercase tracking-[0.12em] text-ink-muted">
+                                    Scan this code with the phone
+                                </p>
+                                <div className="mt-4 flex justify-center">
+                                    <div className="rounded-lg bg-white p-3">
+                                        <QRCode
+                                            value={pairing.blob}
+                                            size={240}
+                                            bgColor="#ffffff"
+                                            fgColor="#0b0d12"
+                                        />
+                                    </div>
+                                </div>
+                                <p className="mt-5 font-sans text-xs uppercase tracking-[0.12em] text-ink-muted">
                                     Compare this code with your phone
                                 </p>
                                 <p className="mt-3 font-mono text-5xl font-semibold tracking-[0.08em] text-ink">

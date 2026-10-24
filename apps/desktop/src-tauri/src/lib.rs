@@ -19,12 +19,15 @@ use rand::RngCore;
 use tauri::State;
 
 use crate::config::ServerConfig;
-use crate::devices::{DeviceEntry, DeviceStore, CAP_CONTROL, CAP_VIEW};
+use crate::devices::{hex, unhex, unix_now, DeviceEntry, DeviceStore, CAP_CONTROL, CAP_VIEW};
 use crate::server::Server;
 use crate::source::{FrameSource, SyntheticSource};
 
 /// How long a pairing code stays valid.
 const PAIRING_TTL_SECONDS: u64 = 300;
+
+/// The name of a device that has not connected yet.
+const PENDING_DEVICE_NAME: &str = "pending phone";
 
 pub struct AppState {
     server: Arc<Server>,
@@ -34,6 +37,7 @@ pub struct AppState {
 }
 
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServerStatus {
     running: bool,
     port: u16,
@@ -46,18 +50,20 @@ pub struct ServerStatus {
 }
 
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceInfo {
     id: String,
     name: String,
-    paired: bool,
-    revoked: bool,
 }
 
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PairingInfo {
     blob: String,
     safety_code: String,
     expires_in_seconds: u64,
+    /// Unix seconds when the code stops being usable.
+    expires_at: u64,
 }
 
 #[tauri::command]
@@ -103,42 +109,50 @@ fn create_pairing(state: State<'_, AppState>) -> Result<PairingInfo, String> {
     create_pairing_entry(&state.config, &mut store, &state.store_path)
 }
 
-/// Creates a pairing code and stores the device as pending.
+/// The pairing code that is alive right now, if there is one.
+#[tauri::command]
+fn current_pairing(state: State<'_, AppState>) -> Result<Option<PairingInfo>, String> {
+    let mut store = state.store.lock().expect("store is not poisoned");
+    refresh(&mut store, &state.store_path);
+    let now = unix_now();
+    prune(&mut store, &state.store_path, now);
+    let Some(entry) = store.pending().cloned() else {
+        return Ok(None);
+    };
+    Ok(Some(pairing_info(&state.config, &entry, now)?))
+}
+
+/// Creates a pairing code and stores the device as pending. The new code
+/// replaces the previous one, so there is only ever one pending device.
 fn create_pairing_entry(
     config: &ServerConfig,
     store: &mut DeviceStore,
     store_path: &Path,
 ) -> Result<PairingInfo, String> {
+    let now = unix_now();
+    refresh(store, store_path);
+    prune(store, store_path, now);
+    store.remove_pending();
+
     let mut device_id = [0u8; 16];
     rand::rng().fill_bytes(&mut device_id);
     let psk = Psk::generate();
 
     let entry = DeviceEntry {
         id: hex(&device_id),
-        name: "pending phone".to_string(),
+        name: PENDING_DEVICE_NAME.to_string(),
         psk: hex(psk.as_bytes()),
         caps: CAP_VIEW | CAP_CONTROL,
         paired: false,
         revoked: false,
-        created_at: now_iso8601(),
+        created_at: now_stamp(),
+        expires_at: now + PAIRING_TTL_SECONDS,
     };
 
-    store.upsert(entry);
+    store.upsert(entry.clone());
     store.save(store_path).map_err(|error| error.to_string())?;
 
-    let blob = PairingBlob::new(
-        device_id,
-        psk,
-        &config.server_name,
-        &local_address(),
-        config.port,
-    );
-
-    Ok(PairingInfo {
-        blob: blob.encode(),
-        safety_code: format_safety_code(blob.safety_code()),
-        expires_in_seconds: PAIRING_TTL_SECONDS,
-    })
+    pairing_info(config, &entry, now)
 }
 
 /// Prints a pairing code, for the headless mode.
@@ -152,42 +166,47 @@ pub fn print_pairing() -> Result<(), String> {
     Ok(())
 }
 
+/// The phones that completed the handshake.
 #[tauri::command]
 fn paired_devices(state: State<'_, AppState>) -> Vec<DeviceInfo> {
-    let store = state.store.lock().expect("store is not poisoned");
+    let mut store = state.store.lock().expect("store is not poisoned");
+    refresh(&mut store, &state.store_path);
+    prune(&mut store, &state.store_path, unix_now());
     store
         .devices
         .iter()
+        .filter(|entry| entry.paired)
         .map(|entry| DeviceInfo {
             id: entry.id.clone(),
             name: entry.name.clone(),
-            paired: entry.paired,
-            revoked: entry.revoked,
         })
         .collect()
 }
 
-/// Revokes a device. The device cannot connect again, not even with the
-/// right pairing secret.
+/// Removes a device. The pairing secret is gone, so the phone cannot connect
+/// again, not even with the code it kept.
 #[tauri::command]
 fn revoke_device(state: State<'_, AppState>, id: String) -> Result<(), String> {
     let mut store = state.store.lock().expect("store is not poisoned");
-    let Some(entry) = store.devices.iter_mut().find(|entry| entry.id == id) else {
+    refresh(&mut store, &state.store_path);
+    if !store.remove(&id) {
         return Err("no such device".to_string());
-    };
-    entry.revoked = true;
+    }
     store
         .save(&state.store_path)
         .map_err(|error| error.to_string())
 }
 
-/// Builds the server and the state the commands need.
+/// Builds the server and the state the commands need. The server and the
+/// commands share one store, so a device the interface pairs is a device the
+/// server accepts.
 pub fn build_state(
     config: ServerConfig,
     store: DeviceStore,
     store_path: PathBuf,
     source: Arc<dyn FrameSource>,
 ) -> (AppState, Arc<Server>) {
+    let store = Arc::new(Mutex::new(store));
     let server = Arc::new(Server::new(
         config.clone(),
         store.clone(),
@@ -196,7 +215,7 @@ pub fn build_state(
     ));
     let state = AppState {
         server: server.clone(),
-        store: Arc::new(Mutex::new(store)),
+        store,
         store_path,
         config,
     };
@@ -237,6 +256,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             server_status,
             create_pairing,
+            current_pairing,
             paired_devices,
             revoke_device,
             get_config,
@@ -255,9 +275,11 @@ pub fn run_headless() -> Result<(), String> {
         )
         .init();
 
-    let config = ServerConfig::load(&config::config_path()).map_err(|error| error.to_string())?;
+    let config = ServerConfig::load(&config::config_path()).unwrap_or_default();
     let store_path = config::device_store_path();
-    let store = DeviceStore::load(&store_path).unwrap_or_default();
+    let store = Arc::new(Mutex::new(
+        DeviceStore::load(&store_path).unwrap_or_default(),
+    ));
     let source = default_source(&config);
     let server = Arc::new(Server::new(config, store, store_path, source));
 
@@ -280,14 +302,51 @@ pub fn local_address() -> String {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+/// Rebuilds the pairing code of a pending device.
+fn pairing_info(
+    config: &ServerConfig,
+    entry: &DeviceEntry,
+    now: u64,
+) -> Result<PairingInfo, String> {
+    let device_id: [u8; 16] = unhex(&entry.id)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or("the device id is corrupt")?;
+    let psk = Psk::from_slice(&unhex(&entry.psk).ok_or("the pairing secret is corrupt")?)
+        .map_err(|error| error.to_string())?;
+    let blob = PairingBlob::new(
+        device_id,
+        psk,
+        &config.server_name,
+        &local_address(),
+        config.port,
+    );
+    Ok(PairingInfo {
+        blob: blob.encode(),
+        safety_code: format_safety_code(blob.safety_code()),
+        expires_in_seconds: entry.expires_at.saturating_sub(now),
+        expires_at: entry.expires_at,
+    })
 }
 
-fn now_iso8601() -> String {
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    format!("unix:{seconds}")
+/// The store file is the source of truth. A code created by the command line
+/// while the app was running has to be seen by the running server.
+fn refresh(store: &mut DeviceStore, store_path: &Path) {
+    if let Err(error) = store.reload(store_path) {
+        tracing::warn!(%error, "cannot read the device store");
+    }
+}
+
+/// Drops the entries that cannot be used any more, and writes the file when
+/// something was dropped.
+fn prune(store: &mut DeviceStore, store_path: &Path, now: u64) {
+    if store.prune(now).is_empty() {
+        return;
+    }
+    if let Err(error) = store.save(store_path) {
+        tracing::warn!(%error, "cannot save the device store");
+    }
+}
+
+fn now_stamp() -> String {
+    format!("unix:{}", unix_now())
 }

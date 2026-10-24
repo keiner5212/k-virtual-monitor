@@ -24,6 +24,13 @@ authentication disabled.
    share the same secret; it is not a secret by itself.
 4. The desktop stores the phone as a pending device. The first successful
    handshake marks it as paired.
+5. A pending device is good for five minutes. The server refuses a handshake
+   with an expired code and drops the entry, so a code that was never scanned
+   cannot be used later.
+
+Only one code is alive at a time: a new code replaces the previous one. A
+revoked device is deleted from the store, so the secret is gone and the phone
+cannot connect again, not even with the code it kept.
 
 The secret is written to `~/.local/state/kvm/devices.json` with mode `0600`
 inside a `0700` directory, written atomically.

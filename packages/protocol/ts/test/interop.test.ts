@@ -81,22 +81,7 @@ describe("the Rust server and the TypeScript client", () => {
             `port = ${port}\nbind = "127.0.0.1"\nwidth = 320\nheight = 240\nfps = 20\n`,
         );
 
-        const pairing = await new Promise<string>((resolve, reject) => {
-            const child = spawn(binary, ["--pair"], { env: environment });
-            let output = "";
-            child.stdout.on("data", (chunk) => {
-                output += String(chunk);
-            });
-            child.on("error", reject);
-            child.on("close", (code) => {
-                const match = output.match(/pairing code: (\S+)/);
-                if (code !== 0 || !match) {
-                    reject(new Error(`the pairing failed: ${output}`));
-                    return;
-                }
-                resolve(match[1] as string);
-            });
-        });
+        const pairing = await createPairing(environment);
 
         const server = spawn(binary, ["--headless"], { env: environment });
         try {
@@ -144,7 +129,63 @@ describe("the Rust server and the TypeScript client", () => {
             rmSync(directory, { recursive: true, force: true });
         }
     });
+
+    itWithServer("accept a pairing code created while the server runs", async () => {
+        const directory = mkdtempSync(join(tmpdir(), "kvm-interop-"));
+        const port = await freePort();
+        const environment = {
+            ...process.env,
+            KVM_STORE_PATH: join(directory, "devices.json"),
+            KVM_CONFIG_PATH: join(directory, "config.toml"),
+        };
+        writeFileSync(
+            environment.KVM_CONFIG_PATH,
+            `port = ${port}\nbind = "127.0.0.1"\nwidth = 320\nheight = 240\nfps = 20\n`,
+        );
+
+        const server = spawn(binary, ["--headless"], { env: environment });
+        try {
+            await waitForPort(port, 5000);
+
+            // The code is created after the server is already listening, the
+            // way the desktop creates it from its interface.
+            const pairing = await createPairing(environment);
+
+            const socket = await connect(port);
+            const channel = new MessageChannel(socket, 4 * 1024 * 1024);
+            const keys = await clientHandshake(channel, pskOf(pairing), helloOf(pairing));
+            const session = new Session(keys, "client");
+
+            const first = await channel.next();
+            expect(first.header.type).toBe(MessageType.DisplayInfo);
+            const info = decodeDisplayInfo(session.open(first.header, first.payload));
+            expect(info.width).toBe(320);
+        } finally {
+            server.kill();
+            rmSync(directory, { recursive: true, force: true });
+        }
+    });
 });
+
+/** Creates a pairing code and returns the blob. */
+function createPairing(environment: NodeJS.ProcessEnv): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+        const child = spawn(binary, ["--pair"], { env: environment });
+        let output = "";
+        child.stdout.on("data", (chunk) => {
+            output += String(chunk);
+        });
+        child.on("error", reject);
+        child.on("close", (code) => {
+            const match = output.match(/pairing code: (\S+)/);
+            if (code !== 0 || !match) {
+                reject(new Error(`the pairing failed: ${output}`));
+                return;
+            }
+            resolve(match[1] as string);
+        });
+    });
+}
 
 /** The pairing secret of the blob, the same one the phone would keep. */
 function pskOf(blob: string): Uint8Array {

@@ -15,13 +15,13 @@ export interface PairingInfo {
     blob: string;
     safetyCode: string;
     expiresInSeconds: number;
+    /** Unix seconds when the code stops being usable. */
+    expiresAt: number;
 }
 
 export interface DeviceInfo {
     id: string;
     name: string;
-    paired: boolean;
-    revoked: boolean;
 }
 
 export interface ServerConfig {
@@ -45,6 +45,10 @@ export function serverStatus(): Promise<ServerStatus> {
 
 export function createPairing(): Promise<PairingInfo> {
     return invoke<PairingInfo>("create_pairing");
+}
+
+export function currentPairing(): Promise<PairingInfo | null> {
+    return invoke<PairingInfo | null>("current_pairing");
 }
 
 export function pairedDevices(): Promise<DeviceInfo[]> {

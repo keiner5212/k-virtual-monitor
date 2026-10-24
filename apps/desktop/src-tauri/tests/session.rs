@@ -1,7 +1,7 @@
 //! End to end test of a session: a paired client connects, completes the
 //! handshake and receives frames over a real TCP socket.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use kvm_desktop_lib::config::ServerConfig;
 use kvm_desktop_lib::devices::{DeviceEntry, DeviceStore, CAP_VIEW};
@@ -42,6 +42,7 @@ async fn start() -> Fixture {
         paired: true,
         revoked: false,
         created_at: "test".to_string(),
+        expires_at: 0,
     });
 
     let config = ServerConfig {
@@ -54,7 +55,7 @@ async fn start() -> Fixture {
     };
     let server = Arc::new(Server::new(
         config,
-        store,
+        Arc::new(Mutex::new(store)),
         store_path,
         Arc::new(SyntheticSource::new(320, 240, 70)),
     ));

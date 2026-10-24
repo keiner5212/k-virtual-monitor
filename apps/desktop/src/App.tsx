@@ -7,6 +7,7 @@ import StatusMark from "./components/react-bits/StatusMark";
 import TitleBar from "./components/TitleBar";
 import {
     createPairing,
+    currentPairing,
     getConfig,
     pairedDevices,
     revokeDevice,
@@ -57,16 +58,30 @@ export default function App() {
     const [draft, setDraft] = useState<ServerConfig | null>(null);
     const [devices, setDevices] = useState<DeviceInfo[]>([]);
     const [pairing, setPairing] = useState<PairingInfo | null>(null);
-    const [expiresAt, setExpiresAt] = useState<number | null>(null);
     const [now, setNow] = useState(() => Date.now());
     const [error, setError] = useState<string | null>(null);
     const [saveState, setSaveState] = useState<SaveState>("idle");
 
     const refresh = useCallback(async () => {
         try {
-            const [nextStatus, nextDevices] = await Promise.all([serverStatus(), pairedDevices()]);
+            const [nextStatus, nextDevices, nextPairing] = await Promise.all([
+                serverStatus(),
+                pairedDevices(),
+                currentPairing(),
+            ]);
             setStatus(nextStatus);
             setDevices(nextDevices);
+            setPairing((current) => {
+                if (!current) {
+                    return nextPairing;
+                }
+                if (!nextPairing) {
+                    // The phone took the code, or it ran out of time.
+                    return current.expiresAt * 1000 <= Date.now() ? null : current;
+                }
+                // A newer code always expires later, so the newer one wins.
+                return nextPairing.expiresAt >= current.expiresAt ? nextPairing : current;
+            });
             setError(null);
         } catch (cause) {
             setError(cause instanceof Error ? cause.message : String(cause));
@@ -110,7 +125,6 @@ export default function App() {
         try {
             const created = await createPairing();
             setPairing(created);
-            setExpiresAt(Date.now() + created.expiresInSeconds * 1000);
         } catch (cause) {
             setError(cause instanceof Error ? cause.message : String(cause));
         }
@@ -154,7 +168,9 @@ export default function App() {
 
     const serverName = config?.server_name ?? "k-virtual-monitor";
     const live = Boolean(status?.sessions);
-    const remaining = expiresAt ? Math.max(0, Math.round((expiresAt - now) / 1000)) : 0;
+    const remaining = pairing
+        ? Math.max(0, Math.round((pairing.expiresAt * 1000 - now) / 1000))
+        : 0;
     const expired = pairing !== null && remaining <= 0;
 
     const statusView = useMemo(() => {
@@ -213,7 +229,7 @@ export default function App() {
                         </StatTile>
                         <StatTile label="Paired">
                             <CountUp
-                                to={devices.filter((device) => device.paired).length}
+                                to={devices.length}
                                 from={0}
                                 duration={0.5}
                                 mode="count"
@@ -322,19 +338,14 @@ export default function App() {
                                     key={device.id}
                                     className="flex items-center justify-between gap-3 rounded-lg border border-border-subtle bg-surface px-3 py-2"
                                 >
-                                    <span className="font-mono text-sm text-ink">
-                                        {device.name}
-                                        {device.revoked ? " (revoked)" : device.paired ? "" : " (pending)"}
-                                    </span>
-                                    {device.revoked ? null : (
-                                        <button
-                                            type="button"
-                                            className={ghostButton}
-                                            onClick={() => void revoke(device.id)}
-                                        >
-                                            Revoke
-                                        </button>
-                                    )}
+                                    <span className="font-mono text-sm text-ink">{device.name}</span>
+                                    <button
+                                        type="button"
+                                        className={ghostButton}
+                                        onClick={() => void revoke(device.id)}
+                                    >
+                                        Revoke
+                                    </button>
                                 </li>
                             ))}
                         </ul>

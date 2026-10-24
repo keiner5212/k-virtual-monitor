@@ -24,7 +24,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use crate::config::ServerConfig;
-use crate::devices::DeviceStore;
+use crate::devices::{hex, unhex, unix_now, DeviceStore};
 use crate::source::{EncodedFrame, FrameSource};
 
 /// What the live session is doing, for the user interface.
@@ -49,13 +49,13 @@ pub struct Server {
 impl Server {
     pub fn new(
         config: ServerConfig,
-        store: DeviceStore,
+        store: Arc<Mutex<DeviceStore>>,
         store_path: PathBuf,
         source: Arc<dyn FrameSource>,
     ) -> Self {
         Server {
             config,
-            store: Arc::new(Mutex::new(store)),
+            store,
             store_path,
             source,
             sessions: Arc::new(AtomicUsize::new(0)),
@@ -183,28 +183,22 @@ impl Server {
             let Some(entry) = store.find(&hex(&hello.device_id)).cloned() else {
                 return;
             };
-            let mut entry = entry;
             if entry.revoked {
                 tracing::info!(%peer, device = %entry.name, "the device was revoked");
                 return;
             }
-            let renamed = entry.name != hello.device_name;
-            entry.name = hello.device_name.clone();
-            entry.paired = true;
-            store.upsert(entry.clone());
-            (entry, renamed)
-        };
-        let (entry, renamed) = entry;
-        if renamed {
-            if let Err(error) = self
-                .store
-                .lock()
-                .expect("device store is not poisoned")
-                .save(&self.store_path)
-            {
-                tracing::error!(%error, "cannot save the device store");
+            let mut updated = entry.clone();
+            updated.name = hello.device_name.clone();
+            updated.paired = true;
+            let changed = updated != entry;
+            store.upsert(updated.clone());
+            if changed {
+                if let Err(error) = store.save(&self.store_path) {
+                    tracing::error!(%error, "cannot save the device store");
+                }
             }
-        }
+            updated
+        };
 
         let Some(codec) = codec::negotiate(hello.codec_mask, self.source.codecs()) else {
             tracing::info!(%peer, "the client cannot decode any codec we produce");
@@ -234,12 +228,17 @@ impl Server {
 
     fn psk_for(&self, hello: &Hello) -> Option<Psk> {
         let id = hex(&hello.device_id);
-        let store = self.store.lock().expect("device store is not poisoned");
+        let mut store = self.store.lock().expect("device store is not poisoned");
+        // The store file is the source of truth: a code created by the
+        // command line while the app was running has to be accepted.
+        if let Err(error) = store.reload(&self.store_path) {
+            tracing::warn!(%error, "cannot read the device store");
+        }
         let entry = store.find(&id)?;
-        if entry.revoked {
+        if entry.revoked || entry.is_expired(unix_now()) {
             return None;
         }
-        Psk::from_slice(&hex_bytes(&entry.psk)?).ok()
+        Psk::from_slice(&unhex(&entry.psk)?).ok()
     }
 
     async fn run_session(
@@ -463,19 +462,4 @@ impl Server {
             .map_err(|error| error.to_string())?;
         Ok(true)
     }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-/// Decodes a hex string. A corrupt value is an error, not a zero byte: a
-/// device with a broken secret must not be able to connect.
-fn hex_bytes(text: &str) -> Option<Vec<u8>> {
-    if text.len() % 2 != 0 {
-        return None;
-    }
-    (0..text.len() / 2)
-        .map(|i| u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok())
-        .collect()
 }

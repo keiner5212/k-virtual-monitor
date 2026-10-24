@@ -45,6 +45,9 @@ class KvmVideoView(context: Context, appContext: AppContext) :
     private var codecHeight = 0
     private var reported = false
     private var ptsUs = 0L
+    private var heldKeyframe: ByteArray? = null
+    private var heldWidth = 0
+    private var heldHeight = 0
 
     init {
         texture.layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
@@ -60,26 +63,44 @@ class KvmVideoView(context: Context, appContext: AppContext) :
             return
         }
         synchronized(lock) {
+            if (keyframe) {
+                heldKeyframe = bytes
+                heldWidth = width
+                heldHeight = height
+            }
             val current = surface
             if (current == null || !current.isValid) {
                 return
             }
-            if (codec == null || width != codecWidth || height != codecHeight) {
-                if (!keyframe) {
-                    return
-                }
-                if (!startCodec(current, bytes, width, height)) {
-                    return
-                }
-            }
-            queue(bytes, keyframe)
+            show(current, bytes, keyframe, width, height)
         }
+    }
+
+    private fun show(target: Surface, bytes: ByteArray, keyframe: Boolean, width: Int, height: Int) {
+        if (codec == null || width != codecWidth || height != codecHeight) {
+            val key = if (keyframe) bytes else heldKeyframe ?: return
+            val keyWidth = if (keyframe) width else heldWidth
+            val keyHeight = if (keyframe) height else heldHeight
+            if (keyWidth != width || keyHeight != height) {
+                return
+            }
+            if (!startCodec(target, key, width, height)) {
+                return
+            }
+            if (!keyframe) {
+                queue(key, true)
+            }
+        }
+        queue(bytes, keyframe)
     }
 
     override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
         synchronized(lock) {
             surface?.release()
-            surface = Surface(texture)
+            val created = Surface(texture)
+            surface = created
+            val key = heldKeyframe ?: return
+            show(created, key, true, heldWidth, heldHeight)
         }
     }
 
@@ -140,7 +161,8 @@ class KvmVideoView(context: Context, appContext: AppContext) :
         }
         input.clear()
         if (bytes.size > input.capacity()) {
-            decoder.queueInputBuffer(index, 0, 0, ptsUs, 0)
+            decoder.queueInputBuffer(index, 0, 0, 0, 0)
+            report("the frame is larger than the decoder can take")
             return
         }
         input.put(bytes)

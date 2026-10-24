@@ -6,7 +6,6 @@
 
 pub mod config;
 pub mod devices;
-mod h264;
 pub mod server;
 pub mod source;
 mod virtual_output;

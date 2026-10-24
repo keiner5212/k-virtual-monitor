@@ -3,17 +3,16 @@
 //! A RemoteDesktop session with a ScreenCast source of type virtual makes KWin
 //! add a new monitor. It does not mirror an existing one. The first allow
 //! prompt is the remote-control prompt. The stream comes back as a PipeWire
-//! node. The development headers are not installed, so the library is loaded
-//! by name and the structs below follow the PipeWire 1.0-1.6 ABI.
+//! node id. GStreamer (`pipewiresrc`) reads that node. The portal socket is
+//! not used: handing that fd to a second PipeWire client aborts the stream.
 
 use rand::RngCore;
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
-use std::os::fd::IntoRawFd;
+use std::io::{Read, Write};
 use std::path::Path;
-use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -22,30 +21,7 @@ use kvm_protocol::messages::FrameHeader;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
 use zbus::{blocking::Connection, proxy};
 
-use crate::h264::{self, H264Session};
 use crate::source::{EncodedFrame, FrameSource, StreamMode};
-
-const SPA_TYPE_ID: u32 = 3;
-const SPA_TYPE_RECTANGLE: u32 = 10;
-const SPA_TYPE_FRACTION: u32 = 11;
-const SPA_TYPE_OBJECT: u32 = 15;
-const SPA_TYPE_CHOICE: u32 = 19;
-const SPA_TYPE_OBJECT_FORMAT: u32 = 0x40003;
-const SPA_PARAM_FORMAT: u32 = 4;
-const SPA_CHOICE_RANGE: u32 = 1;
-const SPA_CHOICE_ENUM: u32 = 3;
-const SPA_FORMAT_VIDEO_FORMAT: u32 = 0x20001;
-const SPA_FORMAT_VIDEO_SIZE: u32 = 0x20003;
-const SPA_VIDEO_RGBX: u32 = 7;
-const SPA_VIDEO_BGRX: u32 = 8;
-const SPA_VIDEO_RGBA: u32 = 11;
-const SPA_VIDEO_BGRA: u32 = 12;
-const SPA_VIDEO_RGB: u32 = 15;
-const SPA_VIDEO_BGR: u32 = 16;
-
-const RTLD_LAZY: i32 = 1;
-const PROT_READ: i32 = 1;
-const MAP_SHARED: i32 = 1;
 
 /// How long the last picture is repeated when the screen does not change.
 ///
@@ -91,27 +67,21 @@ struct Inner {
     cv: Condvar,
     stop: AtomicBool,
     status: Mutex<String>,
-    loop_ptr: AtomicPtr<std::ffi::c_void>,
-    quit: Mutex<Option<QuitFn>>,
     thread: Mutex<Option<JoinHandle<()>>>,
     started: Instant,
     seq: AtomicU64,
     delivered: AtomicU64,
     /// When the last picture was handed out.
     last_sent: Mutex<Instant>,
-    /// The size the virtual screen was last set to. The portal gives it a
-    /// size of its own, so the first resize has to happen even when the mode
-    /// did not change.
-    resized: Mutex<Option<(u16, u16)>>,
-    encoder: Mutex<Option<H264Session>>,
-    h264_retry: Mutex<Option<Instant>>,
-    h264_down: AtomicBool,
+    /// Size and rate last applied to the virtual screen. The portal picks
+    /// its own, so the first apply happens even when the mode matches.
+    resized: Mutex<Option<(u16, u16, u16)>>,
     /// When the last frame was produced. A screen with nothing on it produces
     /// no frames at all.
     last_frame: Mutex<Option<Instant>>,
+    /// The GStreamer process. Stop kills it so the read unblocks.
+    gst_pid: AtomicU32,
 }
-
-type QuitFn = unsafe extern "C" fn(*mut std::ffi::c_void) -> i32;
 
 pub struct VirtualSource {
     inner: Arc<Inner>,
@@ -126,18 +96,14 @@ impl VirtualSource {
             cv: Condvar::new(),
             stop: AtomicBool::new(false),
             status: Mutex::new("Accept the prompt. It adds a new screen.".to_string()),
-            loop_ptr: AtomicPtr::new(std::ptr::null_mut()),
-            quit: Mutex::new(None),
             thread: Mutex::new(None),
             started: Instant::now(),
             seq: AtomicU64::new(0),
             delivered: AtomicU64::new(0),
             last_sent: Mutex::new(Instant::now() - Duration::from_secs(1)),
             resized: Mutex::new(None),
-            encoder: Mutex::new(None),
-            h264_retry: Mutex::new(None),
-            h264_down: AtomicBool::new(false),
             last_frame: Mutex::new(None),
+            gst_pid: AtomicU32::new(0),
         });
         inner.spawn();
         VirtualSource { inner }
@@ -156,7 +122,7 @@ impl FrameSource for VirtualSource {
     }
 
     fn codecs(&self) -> u16 {
-        if h264::available() {
+        if gstreamer_h264() {
             codec::H264 | codec::JPEG
         } else {
             codec::JPEG
@@ -181,14 +147,6 @@ impl FrameSource for VirtualSource {
         };
         *slot = mode;
         drop(slot);
-        if codec_bit == codec::H264 {
-            self.inner.h264_down.store(false, Ordering::Relaxed);
-            *self
-                .inner
-                .h264_retry
-                .lock()
-                .expect("h264 retry is not poisoned") = None;
-        }
         if let Some(output) = self
             .inner
             .output
@@ -196,12 +154,12 @@ impl FrameSource for VirtualSource {
             .expect("output is not poisoned")
             .clone()
         {
-            // The display is only touched when the size really changed: every
-            // change is a configuration the whole desktop sees.
+            // The display is only touched when the size or the rate changed.
             let mut resized = self.inner.resized.lock().expect("resized is not poisoned");
-            if *resized != Some((mode.width, mode.height)) {
+            let applied = (mode.width, mode.height, mode.fps);
+            if *resized != Some(applied) {
                 resize_output(&output, mode);
-                *resized = Some((mode.width, mode.height));
+                *resized = Some(applied);
             }
         }
     }
@@ -239,11 +197,11 @@ impl FrameSource for VirtualSource {
 
     fn stop(&self) {
         self.inner.stop.store(true, Ordering::Relaxed);
-        let loop_ptr = self.inner.loop_ptr.load(Ordering::Acquire);
-        if let Some(quit) = *self.inner.quit.lock().expect("quit fn is not poisoned") {
-            if !loop_ptr.is_null() {
-                unsafe { quit(loop_ptr) };
-            }
+        let pid = self.inner.gst_pid.load(Ordering::Acquire);
+        if pid != 0 {
+            let _ = Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .status();
         }
     }
 }
@@ -337,7 +295,7 @@ impl Inner {
         } else {
             self.set_status("Virtual screen is streaming, but it is not in the display list yet");
         }
-        let result = stream_node(self, opened.fd, opened.node);
+        let result = stream_node(self, opened.node);
         // The session ends here, so the virtual screen goes away with it.
         close_session(&connection, &opened.session);
         result
@@ -345,7 +303,6 @@ impl Inner {
 }
 
 struct OpenedStream {
-    fd: std::os::fd::OwnedFd,
     node: u32,
     /// The portal session, so it can be closed when the capture ends.
     session: OwnedObjectPath,
@@ -404,11 +361,7 @@ fn open_virtual_stream(
     })?;
     let (node, output_name) = virtual_node(&started)?;
     let restore_token = started.get("restore_token").and_then(as_string);
-    let fd = screencast
-        .open_pipe_wire_remote(&session, HashMap::new())
-        .map_err(|error| error.to_string())?;
     Ok(OpenedStream {
-        fd: fd.into(),
         node,
         session,
         output_name,
@@ -590,16 +543,17 @@ fn find_output(wanted: Option<&str>, before: &[ScreenOutput]) -> Option<ScreenOu
 
 fn resize_output(output: &ScreenOutput, mode: StreamMode) {
     let id = output.id;
+    let refresh = u32::from(mode.fps) * 1000;
     let _ = Command::new("kscreen-doctor")
         .arg(format!(
-            "output.{id}.addCustomMode.{}.{}.{}.full",
-            mode.width, mode.height, 60_000
+            "output.{id}.addCustomMode.{}.{}.{refresh}.full",
+            mode.width, mode.height
         ))
         .status();
     let status = Command::new("kscreen-doctor")
         .arg(format!(
-            "output.{id}.mode.{}x{}@60",
-            mode.width, mode.height
+            "output.{id}.mode.{}x{}@{}",
+            mode.width, mode.height, mode.fps
         ))
         .arg(format!("output.{id}.scale.1"))
         .arg(format!("output.{id}.enable"))
@@ -646,12 +600,6 @@ trait ScreenCast {
         parent_window: &str,
         options: HashMap<&str, Value<'_>>,
     ) -> zbus::Result<OwnedObjectPath>;
-
-    fn open_pipe_wire_remote(
-        &self,
-        session_handle: &ObjectPath<'_>,
-        options: HashMap<&str, Value<'_>>,
-    ) -> zbus::Result<zbus::zvariant::OwnedFd>;
 }
 
 #[proxy(
@@ -694,361 +642,244 @@ trait Session {
     fn close(&self) -> zbus::Result<()>;
 }
 
-struct Pw {
-    init: unsafe extern "C" fn(*mut i32, *mut *mut *mut i8),
-    main_loop_new: unsafe extern "C" fn(*const std::ffi::c_void) -> *mut std::ffi::c_void,
-    main_loop_get_loop: unsafe extern "C" fn(*mut std::ffi::c_void) -> *mut std::ffi::c_void,
-    main_loop_run: unsafe extern "C" fn(*mut std::ffi::c_void) -> i32,
-    main_loop_quit: QuitFn,
-    context_new: unsafe extern "C" fn(
-        *mut std::ffi::c_void,
-        *mut std::ffi::c_void,
-        usize,
-    ) -> *mut std::ffi::c_void,
-    context_connect_fd: unsafe extern "C" fn(
-        *mut std::ffi::c_void,
-        i32,
-        *mut std::ffi::c_void,
-        usize,
-    ) -> *mut std::ffi::c_void,
-    properties_new_string: unsafe extern "C" fn(*const i8) -> *mut std::ffi::c_void,
-    stream_new_simple: unsafe extern "C" fn(
-        *mut std::ffi::c_void,
-        *const i8,
-        *mut std::ffi::c_void,
-        *const PwStreamEvents,
-        *mut std::ffi::c_void,
-    ) -> *mut std::ffi::c_void,
-    stream_connect:
-        unsafe extern "C" fn(*mut std::ffi::c_void, i32, u32, u32, *const *const u8, u32) -> i32,
-    stream_dequeue_buffer: unsafe extern "C" fn(*mut std::ffi::c_void) -> *mut PwBuffer,
-    stream_queue_buffer: unsafe extern "C" fn(*mut std::ffi::c_void, *mut PwBuffer) -> i32,
-    stream_destroy: unsafe extern "C" fn(*mut std::ffi::c_void),
-    context_destroy: unsafe extern "C" fn(*mut std::ffi::c_void),
+const GST_CAPTURE: &str = r#####"
+import struct, sys, threading
+import gi
+gi.require_version("Gst", "1.0")
+gi.require_version("GLib", "2.0")
+from gi.repository import GLib, Gst
+
+Gst.init(None)
+node = int(sys.argv[1])
+width = int(sys.argv[2])
+height = int(sys.argv[3])
+fps = max(1, int(sys.argv[4]))
+quality = max(1, min(100, int(sys.argv[5])))
+codec = sys.argv[6]
+if codec == "h264":
+    qp = max(18, min(40, 51 - quality * 33 // 100))
+    enc = (
+        f"x264enc tune=zerolatency speed-preset=ultrafast "
+        f"key-int-max={fps} bframes=0 byte-stream=true quantizer={qp} "
+        f"rc-lookahead=0 sync-lookahead=0 sliced-threads=true ! "
+        f"h264parse config-interval=-1 ! "
+        f"video/x-h264,stream-format=byte-stream,alignment=au ! "
+    )
+else:
+    enc = f"jpegenc quality={quality} idct-method=ifast ! "
+desc = (
+    f"pipewiresrc path={node} ! "
+    f"videoconvert ! videoscale method=0 ! "
+    f"videorate drop-only=true skip-to-first=true ! "
+    f"video/x-raw,width={width},height={height},framerate={fps}/1,format=I420 ! "
+    f"{enc}"
+    f"appsink name=sink emit-signals=true max-buffers=1 drop=true sync=false"
+)
+pipeline = Gst.parse_launch(desc)
+sink = pipeline.get_by_name("sink")
+out = sys.stdout.buffer
+lock = threading.Lock()
+
+def on_sample(element):
+    sample = element.emit("pull-sample")
+    if sample is None:
+        return Gst.FlowReturn.OK
+    buf = sample.get_buffer()
+    ok, info = buf.map(Gst.MapFlags.READ)
+    if not ok:
+        return Gst.FlowReturn.OK
+    try:
+        data = bytes(info.data)
+    finally:
+        buf.unmap(info)
+    key = 0 if buf.has_flags(Gst.BufferFlags.DELTA_UNIT) else 1
+    header = struct.pack("<4sIBHH", b"KVMF", len(data), key, width, height)
+    with lock:
+        out.write(header + data)
+        out.flush()
+    return Gst.FlowReturn.OK
+
+sink.connect("new-sample", on_sample)
+loop = GLib.MainLoop()
+bus = pipeline.get_bus()
+bus.add_signal_watch()
+
+def on_bus(_bus, message):
+    if message.type == Gst.MessageType.ERROR:
+        err, debug = message.parse_error()
+        print(f"gstreamer: {err} {debug}", file=sys.stderr, flush=True)
+        loop.quit()
+    elif message.type == Gst.MessageType.EOS:
+        loop.quit()
+
+bus.connect("message", on_bus)
+if pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
+    print("gstreamer: pipeline did not start", file=sys.stderr, flush=True)
+    sys.exit(1)
+try:
+    loop.run()
+finally:
+    pipeline.set_state(Gst.State.NULL)
+"#####;
+
+fn gstreamer_h264() -> bool {
+    static READY: OnceLock<bool> = OnceLock::new();
+    *READY.get_or_init(|| {
+        Command::new("python3")
+            .args([
+                "-c",
+                "import gi\n\
+                 gi.require_version('Gst','1.0')\n\
+                 from gi.repository import Gst\n\
+                 Gst.init(None)\n\
+                 raise SystemExit(0 if Gst.ElementFactory.find('x264enc') else 1)",
+            ])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    })
 }
 
-#[repr(C)]
-struct PwStreamEvents {
-    version: u32,
-    destroy: Option<extern "C" fn(*mut std::ffi::c_void)>,
-    state_changed: Option<extern "C" fn(*mut std::ffi::c_void, i32, i32, *const i8)>,
-    control_info: Option<extern "C" fn(*mut std::ffi::c_void, u32, *mut std::ffi::c_void)>,
-    io_changed: Option<extern "C" fn(*mut std::ffi::c_void, u32, *mut std::ffi::c_void, u32)>,
-    param_changed: Option<extern "C" fn(*mut std::ffi::c_void, u32, *const u8)>,
-    add_buffer: Option<extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void)>,
-    remove_buffer: Option<extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void)>,
-    process: Option<extern "C" fn(*mut std::ffi::c_void)>,
-    drained: Option<extern "C" fn(*mut std::ffi::c_void)>,
-    command: Option<extern "C" fn(*mut std::ffi::c_void, *const u8)>,
-    trigger_done: Option<extern "C" fn(*mut std::ffi::c_void)>,
-}
-
-#[repr(C)]
-struct PwBuffer {
-    buffer: *mut SpaBuffer,
-}
-
-#[repr(C)]
-struct SpaBuffer {
-    n_metas: u32,
-    n_datas: u32,
-    metas: *mut std::ffi::c_void,
-    datas: *mut SpaData,
-}
-
-#[repr(C)]
-struct SpaData {
-    type_: u32,
-    flags: u32,
-    fd: i32,
-    mapoffset: u32,
-    maxsize: u32,
-    data: *mut u8,
-    chunk: *mut SpaChunk,
-}
-
-#[repr(C)]
-struct SpaChunk {
-    offset: u32,
-    size: u32,
-    stride: i32,
-    flags: i32,
-}
-
-struct CallbackState {
-    inner: Arc<Inner>,
-    pw: Arc<Pw>,
-    stream: *mut std::ffi::c_void,
-    format: u32,
-    width: u32,
-    height: u32,
-    last_encode: Instant,
-}
-
-impl Pw {
-    fn load() -> Result<Arc<Self>, String> {
-        let handle = open_pipewire()?;
-        unsafe {
-            Ok(Arc::new(Pw {
-                init: sym(handle, b"pw_init\0")?,
-                main_loop_new: sym(handle, b"pw_main_loop_new\0")?,
-                main_loop_get_loop: sym(handle, b"pw_main_loop_get_loop\0")?,
-                main_loop_run: sym(handle, b"pw_main_loop_run\0")?,
-                main_loop_quit: sym(handle, b"pw_main_loop_quit\0")?,
-                context_new: sym(handle, b"pw_context_new\0")?,
-                context_connect_fd: sym(handle, b"pw_context_connect_fd\0")?,
-                properties_new_string: sym(handle, b"pw_properties_new_string\0")?,
-                stream_new_simple: sym(handle, b"pw_stream_new_simple\0")?,
-                stream_connect: sym(handle, b"pw_stream_connect\0")?,
-                stream_dequeue_buffer: sym(handle, b"pw_stream_dequeue_buffer\0")?,
-                stream_queue_buffer: sym(handle, b"pw_stream_queue_buffer\0")?,
-                stream_destroy: sym(handle, b"pw_stream_destroy\0")?,
-                context_destroy: sym(handle, b"pw_context_destroy\0")?,
-            }))
+fn stream_node(inner: &Arc<Inner>, node: u32) -> Result<(), String> {
+    while !inner.stop.load(Ordering::Relaxed) {
+        let mode = *inner.mode.lock().expect("stream mode is not poisoned");
+        let mut child = spawn_capture(node, mode)?;
+        inner.gst_pid.store(child.id(), Ordering::Release);
+        let stdout = child.stdout.take().ok_or("capture has no picture output")?;
+        let stderr = child.stderr.take();
+        let logged = thread::spawn(move || stderr.map(drain_stderr).unwrap_or_default());
+        let reading = Arc::clone(inner);
+        let reader = thread::spawn(move || read_frames(stdout, &reading));
+        let mut exited = false;
+        loop {
+            if inner.stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let now = *inner.mode.lock().expect("stream mode is not poisoned");
+            if capture_changed(mode, now) {
+                break;
+            }
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    exited = true;
+                    break;
+                }
+                Ok(None) => {}
+                Err(_) => break,
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        inner.gst_pid.store(0, Ordering::Release);
+        let _ = reader.join();
+        let error = logged.join().unwrap_or_default();
+        if inner.stop.load(Ordering::Relaxed) || capture_changed(mode, inner.current_mode()) {
+            continue;
+        }
+        if exited {
+            if error.is_empty() {
+                return Err("gstreamer stopped".to_string());
+            }
+            return Err(error);
         }
     }
-}
-
-fn open_pipewire() -> Result<*mut std::ffi::c_void, String> {
-    const NAMES: [&CStr; 3] = [
-        c"libpipewire-0.3.so.0",
-        c"/usr/lib/x86_64-linux-gnu/libpipewire-0.3.so.0",
-        c"/usr/lib/libpipewire-0.3.so.0",
-    ];
-    for name in NAMES {
-        let handle = unsafe { dlopen(name.as_ptr(), RTLD_LAZY) };
-        if !handle.is_null() {
-            return Ok(handle);
-        }
-    }
-    Err("libpipewire-0.3.so.0 is not installed".to_string())
-}
-
-unsafe fn sym<T>(handle: *mut std::ffi::c_void, name: &[u8]) -> Result<T, String> {
-    let pointer = dlsym(handle, name.as_ptr() as *const i8);
-    if pointer.is_null() {
-        let label = CStr::from_bytes_until_nul(name)
-            .map(|text| text.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| "symbol".to_string());
-        return Err(format!("pipewire is missing {label}"));
-    }
-    Ok(std::mem::transmute_copy(&pointer))
-}
-
-unsafe extern "C" {
-    fn dlopen(filename: *const i8, flags: i32) -> *mut std::ffi::c_void;
-    fn dlsym(handle: *mut std::ffi::c_void, symbol: *const i8) -> *mut std::ffi::c_void;
-    fn mmap(
-        addr: *mut std::ffi::c_void,
-        len: usize,
-        prot: i32,
-        flags: i32,
-        fd: i32,
-        offset: i64,
-    ) -> *mut std::ffi::c_void;
-    fn munmap(addr: *mut std::ffi::c_void, len: usize) -> i32;
-    fn sysconf(name: i32) -> i64;
-}
-
-fn stream_node(inner: &Arc<Inner>, fd: std::os::fd::OwnedFd, node: u32) -> Result<(), String> {
-    let pw = Pw::load()?;
-    unsafe { (pw.init)(std::ptr::null_mut(), std::ptr::null_mut()) };
-    let main_loop = unsafe { (pw.main_loop_new)(std::ptr::null()) };
-    if main_loop.is_null() {
-        return Err("pipewire did not create a loop".to_string());
-    }
-    inner.loop_ptr.store(main_loop, Ordering::Release);
-    *inner.quit.lock().expect("quit fn is not poisoned") = Some(pw.main_loop_quit);
-    let loop_ = unsafe { (pw.main_loop_get_loop)(main_loop) };
-    let context = unsafe { (pw.context_new)(loop_, std::ptr::null_mut(), 0) };
-    if context.is_null() {
-        return Err("pipewire did not create a context".to_string());
-    }
-    let raw_fd = fd.into_raw_fd();
-    let core = unsafe { (pw.context_connect_fd)(context, raw_fd, std::ptr::null_mut(), 0) };
-    if core.is_null() {
-        return Err("pipewire rejected the portal socket".to_string());
-    }
-    let props = CString::new("media.type=Video media.category=Capture media.role=Screen")
-        .map_err(|error| error.to_string())?;
-    let properties = unsafe { (pw.properties_new_string)(props.as_ptr()) };
-    let name = CString::new("kvm-virtual").map_err(|error| error.to_string())?;
-    let mut callback = CallbackState {
-        inner: Arc::clone(inner),
-        pw: Arc::clone(&pw),
-        stream: std::ptr::null_mut(),
-        format: SPA_VIDEO_BGRX,
-        width: 0,
-        height: 0,
-        last_encode: Instant::now() - Duration::from_secs(1),
-    };
-    let events = PwStreamEvents {
-        version: 2,
-        destroy: None,
-        state_changed: Some(on_state),
-        control_info: None,
-        io_changed: None,
-        param_changed: Some(on_param),
-        add_buffer: None,
-        remove_buffer: None,
-        process: Some(on_process),
-        drained: None,
-        command: None,
-        trigger_done: None,
-    };
-    let stream = unsafe {
-        (pw.stream_new_simple)(
-            loop_,
-            name.as_ptr(),
-            properties,
-            &events,
-            &mut callback as *mut CallbackState as *mut std::ffi::c_void,
-        )
-    };
-    if stream.is_null() {
-        return Err("pipewire did not create a stream".to_string());
-    }
-    callback.stream = stream;
-    let pod = format_pod();
-    let ptrs = [pod.as_ptr()];
-    let connected = unsafe { (pw.stream_connect)(stream, 0, node, 1 | 4, ptrs.as_ptr(), 1) };
-    if connected < 0 {
-        return Err(format!(
-            "pipewire did not connect to the virtual screen ({connected})"
-        ));
-    }
-    unsafe { (pw.main_loop_run)(main_loop) };
-    // The loop is over. The stream and the context go with it, so the node
-    // does not stay in the pipewire daemon after the app is gone.
-    unsafe { (pw.stream_destroy)(stream) };
-    unsafe { (pw.context_destroy)(context) };
     Ok(())
 }
 
-extern "C" fn on_state(data: *mut std::ffi::c_void, _old: i32, state: i32, error: *const i8) {
-    // A panic in a callback crosses the C boundary and kills the app, so it
-    // is caught here.
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        read_state(data, state, error)
-    }));
-    if outcome.is_err() {
-        tracing::error!("the state of the virtual screen could not be read");
+fn capture_changed(started: StreamMode, now: StreamMode) -> bool {
+    started.width != now.width
+        || started.height != now.height
+        || started.fps != now.fps
+        || started.quality != now.quality
+        || started.codec != now.codec
+}
+
+impl Inner {
+    fn current_mode(&self) -> StreamMode {
+        *self.mode.lock().expect("stream mode is not poisoned")
     }
 }
 
-fn read_state(data: *mut std::ffi::c_void, state: i32, error: *const i8) {
-    if state != -1 {
-        return;
-    }
-    let callback = unsafe { &*(data as *const CallbackState) };
-    let text = if error.is_null() {
-        "pipewire stopped the stream".to_string()
+fn spawn_capture(node: u32, mode: StreamMode) -> Result<std::process::Child, String> {
+    let codec = if mode.codec == codec::H264 {
+        "h264"
     } else {
-        unsafe { CStr::from_ptr(error) }
-            .to_string_lossy()
-            .into_owned()
+        "jpeg"
     };
-    callback
-        .inner
-        .set_status(format!("Virtual screen was not created: {text}"));
+    let node = node.to_string();
+    let width = mode.width.to_string();
+    let height = mode.height.to_string();
+    let fps = mode.fps.to_string();
+    let quality = mode.quality.to_string();
+    let mut child = Command::new("python3")
+        .args(["-", &node, &width, &height, &fps, &quality, codec])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("python3 is not available: {error}"))?;
+    let mut stdin = child.stdin.take().ok_or("capture has no input")?;
+    stdin
+        .write_all(GST_CAPTURE.as_bytes())
+        .map_err(|error| error.to_string())?;
+    drop(stdin);
+    Ok(child)
 }
 
-extern "C" fn on_param(data: *mut std::ffi::c_void, id: u32, param: *const u8) {
-    let outcome =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_param(data, id, param)));
-    if outcome.is_err() {
-        tracing::error!("the format of the virtual screen could not be read");
+fn drain_stderr(mut stderr: impl Read) -> String {
+    let mut kept = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match stderr.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                kept.extend_from_slice(&chunk[..n]);
+                if kept.len() > 4000 {
+                    let extra = kept.len() - 4000;
+                    kept.drain(..extra);
+                }
+            }
+        }
     }
+    String::from_utf8_lossy(&kept).trim().to_string()
 }
 
-fn read_param(data: *mut std::ffi::c_void, id: u32, param: *const u8) {
-    if id != SPA_PARAM_FORMAT || param.is_null() {
-        return;
-    }
-    let callback = unsafe { &mut *(data as *mut CallbackState) };
-    let bytes = unsafe {
-        let size = u32::from_ne_bytes(
-            std::slice::from_raw_parts(param, 4)
-                .try_into()
-                .unwrap_or([0; 4]),
-        ) as usize;
-        if size > 4096 {
+fn read_frames(mut stdout: impl Read, inner: &Inner) {
+    loop {
+        let mut header = [0u8; 13];
+        if stdout.read_exact(&mut header).is_err() {
             return;
         }
-        std::slice::from_raw_parts(param, 8 + size)
-    };
-    if let Some((format, width, height)) = parse_video(bytes) {
-        callback.format = format;
-        callback.width = width;
-        callback.height = height;
-        tracing::info!(format, width, height, "virtual screen format");
-    }
-}
-
-extern "C" fn on_process(data: *mut std::ffi::c_void) {
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_process(data)));
-    if outcome.is_err() {
-        tracing::error!("a frame of the virtual screen could not be read");
-    }
-}
-
-fn read_process(data: *mut std::ffi::c_void) {
-    let callback = unsafe { &mut *(data as *mut CallbackState) };
-    let buffer = unsafe { (callback.pw.stream_dequeue_buffer)(callback.stream) };
-    if buffer.is_null() {
-        return;
-    }
-    let copied = copy_frame(callback, buffer);
-    unsafe { (callback.pw.stream_queue_buffer)(callback.stream, buffer) };
-    let Some((width, height, rgb)) = copied else {
-        return;
-    };
-    let mode = *callback
-        .inner
-        .mode
-        .lock()
-        .expect("stream mode is not poisoned");
-    let interval = Duration::from_millis(1000 / u64::from(mode.fps.max(1)));
-    if callback.last_encode.elapsed() < interval {
-        return;
-    }
-    callback.last_encode = Instant::now();
-    if mode.codec == codec::H264 && !callback.inner.h264_down.load(Ordering::Relaxed) {
-        match encode_h264(callback, &rgb, width, height, mode) {
-            H264Outcome::Frame(unit) => {
-                publish(
-                    callback.inner.as_ref(),
-                    width,
-                    height,
-                    codec::H264,
-                    unit.keyframe,
-                    unit.bytes,
-                );
-                return;
-            }
-            H264Outcome::Wait => return,
-            H264Outcome::Failed => {
-                callback.inner.h264_down.store(true, Ordering::Relaxed);
-            }
+        if &header[0..4] != b"KVMF" {
+            return;
         }
+        let len = u32::from_le_bytes(header[4..8].try_into().unwrap_or([0; 4])) as usize;
+        if len == 0 || len > 8 * 1024 * 1024 {
+            return;
+        }
+        let keyframe = header[8] != 0;
+        let width = u32::from(u16::from_le_bytes(
+            header[9..11].try_into().unwrap_or([0; 2]),
+        ));
+        let height = u32::from(u16::from_le_bytes(
+            header[11..13].try_into().unwrap_or([0; 2]),
+        ));
+        let mut payload = vec![0u8; len];
+        if stdout.read_exact(&mut payload).is_err() {
+            return;
+        }
+        let codec_bit = if payload_is_jpeg(&payload) {
+            codec::JPEG
+        } else {
+            codec::H264
+        };
+        publish(inner, width, height, codec_bit, keyframe, payload);
     }
-    let Some(payload) = encode_jpeg(&rgb, width, height, mode.quality) else {
-        return;
-    };
-    publish(
-        callback.inner.as_ref(),
-        width,
-        height,
-        codec::JPEG,
-        true,
-        payload,
-    );
 }
 
-enum H264Outcome {
-    Frame(h264::AccessUnit),
-    Wait,
-    Failed,
+fn payload_is_jpeg(payload: &[u8]) -> bool {
+    payload.starts_with(&[0xff, 0xd8])
 }
 
 fn publish(
@@ -1075,411 +906,25 @@ fn publish(
     inner.cv.notify_one();
 }
 
-fn encode_h264(
-    callback: &mut CallbackState,
-    rgb: &[u8],
-    width: u32,
-    height: u32,
-    mode: StreamMode,
-) -> H264Outcome {
-    let retry_at = *callback
-        .inner
-        .h264_retry
-        .lock()
-        .expect("h264 retry is not poisoned");
-    if let Some(failed_at) = retry_at {
-        if failed_at.elapsed() < Duration::from_secs(1) {
-            return H264Outcome::Failed;
-        }
-    }
-    let mut slot = callback
-        .inner
-        .encoder
-        .lock()
-        .expect("h264 encoder is not poisoned");
-    let reopen = slot
-        .as_ref()
-        .map(|session| !session.matches(width, height, mode.fps, mode.quality))
-        .unwrap_or(true);
-    if reopen {
-        match H264Session::open(width, height, mode.fps, mode.quality) {
-            Ok(session) => *slot = Some(session),
-            Err(error) => {
-                *slot = None;
-                drop(slot);
-                *callback
-                    .inner
-                    .h264_retry
-                    .lock()
-                    .expect("h264 retry is not poisoned") = Some(Instant::now());
-                callback.inner.set_status(format!(
-                    "H.264 encoder failed, sending JPEG instead: {error}"
-                ));
-                return H264Outcome::Failed;
-            }
-        }
-    }
-    let Some(session) = slot.as_mut() else {
-        return H264Outcome::Failed;
-    };
-    match session.push(rgb) {
-        Ok(Some(unit)) => H264Outcome::Frame(unit),
-        Ok(None) => H264Outcome::Wait,
-        Err(error) => {
-            *slot = None;
-            drop(slot);
-            *callback
-                .inner
-                .h264_retry
-                .lock()
-                .expect("h264 retry is not poisoned") = Some(Instant::now());
-            callback.inner.set_status(format!(
-                "H.264 encoder failed, sending JPEG instead: {error}"
-            ));
-            H264Outcome::Failed
-        }
-    }
-}
-
-fn copy_frame(callback: &CallbackState, buffer: *mut PwBuffer) -> Option<(u32, u32, Vec<u8>)> {
-    let width = callback.width;
-    let height = callback.height;
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let spa = unsafe { &*(*buffer).buffer };
-    if spa.n_datas == 0 || spa.datas.is_null() {
-        return None;
-    }
-    let data = unsafe { &*spa.datas };
-    if data.chunk.is_null() {
-        return None;
-    }
-    let chunk = unsafe { &*data.chunk };
-    let stride = if chunk.stride == 0 {
-        (width * bytes_per_pixel(callback.format)) as i32
-    } else {
-        chunk.stride
-    };
-    let bpp = bytes_per_pixel(callback.format) as usize;
-    let row = stride.unsigned_abs() as usize;
-    if row < width as usize * bpp {
-        return None;
-    }
-    let need = row.saturating_mul(height as usize);
-    if need == 0 || need > 64 * 1024 * 1024 {
-        return None;
-    }
-    let available = if chunk.size == 0 {
-        need
-    } else {
-        chunk.size as usize
-    };
-    if available < need {
-        // The frame says it is smaller than the picture it holds.
-        return None;
-    }
-    let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
-    let mut mapped_len = 0usize;
-    let offset = chunk.offset as usize;
-    let base = if !data.data.is_null() {
-        data.data
-    } else if data.fd >= 0 {
-        // The buffer is a dma-buf. Its size is not in the data: a dma-buf
-        // carries no size at all, the chunk knows how much of it the picture
-        // uses. Mapping it with the size of the data maps nothing.
-        let wanted = data.mapoffset as usize + offset;
-        let page = page_size();
-        let start = wanted & !(page - 1);
-        let shift = wanted - start;
-        mapped_len = available + shift;
-        mapped = unsafe {
-            mmap(
-                std::ptr::null_mut(),
-                mapped_len,
-                PROT_READ,
-                MAP_SHARED,
-                data.fd,
-                start as i64,
-            )
-        };
-        if mapped.is_null() || mapped == usize::MAX as *mut std::ffi::c_void {
-            return None;
-        }
-        unsafe { (mapped as *mut u8).add(shift) }
-    } else {
-        return None;
-    };
-    let bytes = unsafe { std::slice::from_raw_parts(base, need) };
-    let rgb = pixels_to_rgb(callback.format, bytes, width, height, stride);
-    if !mapped.is_null() {
-        unsafe { munmap(mapped, mapped_len) };
-    }
-    rgb.map(|rgb| (width, height, rgb))
-}
-
-/// The size of a memory page. The offset of a mapping has to be a multiple
-/// of it.
-fn page_size() -> usize {
-    // _SC_PAGESIZE is 30 on Linux.
-    const SC_PAGESIZE: i32 = 30;
-    let size = unsafe { sysconf(SC_PAGESIZE) };
-    if size > 0 {
-        size as usize
-    } else {
-        4096
-    }
-}
-
-fn bytes_per_pixel(format: u32) -> u32 {
-    match format {
-        SPA_VIDEO_RGB | SPA_VIDEO_BGR => 3,
-        _ => 4,
-    }
-}
-
-fn pixels_to_rgb(format: u32, src: &[u8], width: u32, height: u32, stride: i32) -> Option<Vec<u8>> {
-    let width = width as usize;
-    let height = height as usize;
-    let row = stride.unsigned_abs() as usize;
-    let bpp = bytes_per_pixel(format) as usize;
-    if row < width * bpp || src.len() < row * height {
-        return None;
-    }
-    let mut rgb = vec![0u8; width * height * 3];
-    for y in 0..height {
-        let line = &src[y * row..];
-        for x in 0..width {
-            let (r, g, b) = match format {
-                SPA_VIDEO_RGBX | SPA_VIDEO_RGBA => (line[x * 4], line[x * 4 + 1], line[x * 4 + 2]),
-                SPA_VIDEO_RGB => (line[x * 3], line[x * 3 + 1], line[x * 3 + 2]),
-                SPA_VIDEO_BGR => (line[x * 3 + 2], line[x * 3 + 1], line[x * 3]),
-                _ => (line[x * 4 + 2], line[x * 4 + 1], line[x * 4]),
-            };
-            let offset = (y * width + x) * 3;
-            rgb[offset] = r;
-            rgb[offset + 1] = g;
-            rgb[offset + 2] = b;
-        }
-    }
-    Some(rgb)
-}
-
-fn encode_jpeg(rgb: &[u8], width: u32, height: u32, quality: u8) -> Option<Vec<u8>> {
-    let mut payload = Vec::new();
-    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut payload, quality);
-    encoder
-        .encode(rgb, width, height, image::ExtendedColorType::Rgb8)
-        .ok()?;
-    Some(payload)
-}
-
-fn format_pod() -> Vec<u8> {
-    let mut props = Vec::new();
-    push_prop(&mut props, 1, &pod_id(2));
-    push_prop(&mut props, 2, &pod_id(1));
-    push_prop(
-        &mut props,
-        SPA_FORMAT_VIDEO_FORMAT,
-        &choice_enum_id(&[
-            SPA_VIDEO_BGRX,
-            SPA_VIDEO_BGRX,
-            SPA_VIDEO_BGRA,
-            SPA_VIDEO_RGBX,
-            SPA_VIDEO_RGBA,
-        ]),
-    );
-    push_prop(
-        &mut props,
-        SPA_FORMAT_VIDEO_SIZE,
-        &choice_range_rectangle(1920, 1080, 1, 1, 8192, 8192),
-    );
-    push_prop(
-        &mut props,
-        0x20004,
-        &choice_range_fraction(30, 1, 0, 1, 240, 1),
-    );
-    let mut pod = Vec::new();
-    let body = 8 + props.len();
-    pod.extend_from_slice(&(body as u32).to_ne_bytes());
-    pod.extend_from_slice(&SPA_TYPE_OBJECT.to_ne_bytes());
-    pod.extend_from_slice(&SPA_TYPE_OBJECT_FORMAT.to_ne_bytes());
-    pod.extend_from_slice(&SPA_PARAM_FORMAT.to_ne_bytes());
-    pod.extend_from_slice(&props);
-    pad(&mut pod);
-    pod
-}
-
-fn push_prop(buf: &mut Vec<u8>, key: u32, value: &[u8]) {
-    buf.extend_from_slice(&key.to_ne_bytes());
-    buf.extend_from_slice(&0u32.to_ne_bytes());
-    buf.extend_from_slice(value);
-}
-
-fn pad(buf: &mut Vec<u8>) {
-    while buf.len() % 8 != 0 {
-        buf.push(0);
-    }
-}
-
-fn pod_id(id: u32) -> Vec<u8> {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(&4u32.to_ne_bytes());
-    buf.extend_from_slice(&SPA_TYPE_ID.to_ne_bytes());
-    buf.extend_from_slice(&id.to_ne_bytes());
-    pad(&mut buf);
-    buf
-}
-
-fn pod_rectangle(width: u32, height: u32) -> Vec<u8> {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(&8u32.to_ne_bytes());
-    buf.extend_from_slice(&SPA_TYPE_RECTANGLE.to_ne_bytes());
-    buf.extend_from_slice(&width.to_ne_bytes());
-    buf.extend_from_slice(&height.to_ne_bytes());
-    buf
-}
-
-fn pod_fraction(num: u32, denom: u32) -> Vec<u8> {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(&8u32.to_ne_bytes());
-    buf.extend_from_slice(&SPA_TYPE_FRACTION.to_ne_bytes());
-    buf.extend_from_slice(&num.to_ne_bytes());
-    buf.extend_from_slice(&denom.to_ne_bytes());
-    buf
-}
-
-fn choice(kind: u32, children: &[u8]) -> Vec<u8> {
-    let mut buf = Vec::new();
-    let body = 8 + children.len();
-    buf.extend_from_slice(&(body as u32).to_ne_bytes());
-    buf.extend_from_slice(&SPA_TYPE_CHOICE.to_ne_bytes());
-    buf.extend_from_slice(&kind.to_ne_bytes());
-    buf.extend_from_slice(&0u32.to_ne_bytes());
-    buf.extend_from_slice(children);
-    pad(&mut buf);
-    buf
-}
-
-fn choice_enum_id(ids: &[u32]) -> Vec<u8> {
-    let mut children = Vec::new();
-    for id in ids {
-        children.extend(pod_id(*id));
-    }
-    choice(SPA_CHOICE_ENUM, &children)
-}
-
-fn choice_range_rectangle(
-    dw: u32,
-    dh: u32,
-    min_w: u32,
-    min_h: u32,
-    max_w: u32,
-    max_h: u32,
-) -> Vec<u8> {
-    let mut children = Vec::new();
-    children.extend(pod_rectangle(dw, dh));
-    children.extend(pod_rectangle(min_w, min_h));
-    children.extend(pod_rectangle(max_w, max_h));
-    choice(SPA_CHOICE_RANGE, &children)
-}
-
-fn choice_range_fraction(
-    dn: u32,
-    dd: u32,
-    min_n: u32,
-    min_d: u32,
-    max_n: u32,
-    max_d: u32,
-) -> Vec<u8> {
-    let mut children = Vec::new();
-    children.extend(pod_fraction(dn, dd));
-    children.extend(pod_fraction(min_n, min_d));
-    children.extend(pod_fraction(max_n, max_d));
-    choice(SPA_CHOICE_RANGE, &children)
-}
-
-struct Pod<'a> {
-    kind: u32,
-    body: &'a [u8],
-}
-
-fn read_pod(bytes: &[u8]) -> Option<Pod<'_>> {
-    if bytes.len() < 8 {
-        return None;
-    }
-    let size = u32::from_ne_bytes(bytes[0..4].try_into().ok()?) as usize;
-    let kind = u32::from_ne_bytes(bytes[4..8].try_into().ok()?);
-    if bytes.len() < 8 + size {
-        return None;
-    }
-    Some(Pod {
-        kind,
-        body: &bytes[8..8 + size],
-    })
-}
-
-fn object_props(body: &[u8]) -> Vec<(u32, Pod<'_>)> {
-    if body.len() < 8 {
-        return Vec::new();
-    }
-    let mut offset = 8;
-    let mut props = Vec::new();
-    while offset + 8 <= body.len() {
-        let key = u32::from_ne_bytes(body[offset..offset + 4].try_into().unwrap_or([0; 4]));
-        offset += 8;
-        let Some(rest) = body.get(offset..) else {
-            break;
-        };
-        let Some(pod) = read_pod(rest) else {
-            break;
-        };
-        let size = u32::from_ne_bytes(rest[0..4].try_into().unwrap_or([0; 4])) as usize;
-        props.push((key, pod));
-        offset += (8 + size + 7) & !7;
-    }
-    props
-}
-
-fn choice_default(body: &[u8]) -> Option<Pod<'_>> {
-    let rest = body.get(8..)?;
-    read_pod(rest)
-}
-
-fn parse_video(bytes: &[u8]) -> Option<(u32, u32, u32)> {
-    let pod = read_pod(bytes)?;
-    if pod.kind != SPA_TYPE_OBJECT {
-        return None;
-    }
-    let mut format = None;
-    let mut size = None;
-    for (key, value) in object_props(pod.body) {
-        let value = if value.kind == SPA_TYPE_CHOICE {
-            choice_default(value.body)?
-        } else {
-            value
-        };
-        if key == SPA_FORMAT_VIDEO_FORMAT && value.body.len() >= 4 {
-            format = Some(u32::from_ne_bytes(value.body[0..4].try_into().ok()?));
-        }
-        if key == SPA_FORMAT_VIDEO_SIZE && value.body.len() >= 8 {
-            let width = u32::from_ne_bytes(value.body[0..4].try_into().ok()?);
-            let height = u32::from_ne_bytes(value.body[4..8].try_into().ok()?);
-            size = Some((width, height));
-        }
-    }
-    Some((format?, size?.0, size?.1))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_format_pod_offers_a_raw_video_size() {
-        let (format, width, height) = parse_video(&format_pod()).expect("a video format");
-        assert_eq!(format, SPA_VIDEO_BGRX);
-        assert_eq!((width, height), (1920, 1080));
+    fn scratch_dir() -> std::path::PathBuf {
+        if let Ok(path) = std::env::var("KVM_TMP") {
+            let path = std::path::PathBuf::from(path);
+            let _ = std::fs::create_dir_all(&path);
+            return path;
+        }
+        let compiled = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../.tmp");
+        if std::fs::create_dir_all(&compiled).is_ok() {
+            return compiled;
+        }
+        let local = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(".tmp");
+        let _ = std::fs::create_dir_all(&local);
+        local
     }
 
     #[test]
@@ -1515,17 +960,265 @@ mod tests {
         assert_eq!(u32::try_from(sent_types.clone()).unwrap(), 4);
     }
 
+    /// Grabs the virtual screen the portal creates and checks it against a
+    /// second screenshot of that same output. Skipped in CI.
     #[test]
-    fn pipewire_loads_when_the_library_is_installed() {
-        let present = [
-            "/usr/lib/x86_64-linux-gnu/libpipewire-0.3.so.0",
-            "/usr/lib/libpipewire-0.3.so.0",
-        ]
-        .into_iter()
-        .any(|path| std::path::Path::new(path).exists());
-        if !present {
+    #[ignore = "needs the live desktop and the portal prompt"]
+    fn the_live_virtual_screen_is_a_picture() {
+        let mode = StreamMode {
+            width: 1280,
+            height: 720,
+            fps: 5,
+            quality: 90,
+            codec: codec::JPEG,
+        };
+        let before = list_outputs();
+        let laptop = output_layouts();
+        let source = std::sync::Arc::new(VirtualSource::start(mode));
+        let reading = std::sync::Arc::clone(&source);
+        let reader = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            let mut frames = Vec::new();
+            while frames.len() < 8 && std::time::Instant::now() < deadline {
+                match reading.next_frame() {
+                    Some(frame) => frames.push(frame),
+                    None => break,
+                }
+            }
+            frames
+        });
+        let started = std::time::Instant::now();
+        let mut ready = false;
+        while started.elapsed() < std::time::Duration::from_secs(90) {
+            let status = source.status();
+            eprintln!("capture: {status}");
+            if status.contains("Waiting for the first picture") || status.contains("streaming") {
+                ready = true;
+                break;
+            }
+            if status.starts_with("Virtual screen was not created") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(400));
+        }
+        if ready {
+            paint_marker_on_new_screen();
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
+        let status = source.status();
+        let dir = scratch_dir().join("frames");
+        std::fs::create_dir_all(&dir).expect("frames");
+        let geometry = new_output_geometry(&before);
+        if let Some(geometry) = geometry {
+            let reference = dir.join("live-reference.png");
+            screenshot_output(&reference, geometry);
+        }
+        source.stop();
+        let frames = reader.join().expect("capture thread");
+        let frame = frames.last().unwrap_or_else(|| {
+            panic!("no frame from the virtual screen ({status})");
+        });
+        assert_eq!(frame.header.codec, codec::wire_value(codec::JPEG));
+        assert!(frame.payload.starts_with(&[0xff, 0xd8]));
+        let live = dir.join("live-virtual.jpg");
+        std::fs::write(&live, frame.payload.as_slice()).expect("live jpeg");
+        let decoded = image::load_from_memory(&frame.payload)
+            .expect("the live frame is not a jpeg")
+            .to_rgb8();
+        assert_eq!(
+            decoded.dimensions(),
+            (
+                u32::from(frame.header.width),
+                u32::from(frame.header.height)
+            )
+        );
+        geometry.expect("the new output has no geometry");
+        let reference = dir.join("live-reference.png");
+        let diff = mean_abs_diff(&live, &reference, &dir);
+        eprintln!("live frame differs from the desktop screenshot by {diff:.1}");
+        assert!(
+            diff < 30.0,
+            "the captured frame does not match the screen (mean abs {diff:.1})"
+        );
+        let after = output_layouts();
+        for (name, x, y, width, height) in &laptop {
+            let same = after
+                .iter()
+                .find(|(after_name, _, _, _, _)| after_name == name);
+            assert_eq!(
+                same.map(|(_, ax, ay, aw, ah)| (*ax, *ay, *aw, *ah)),
+                Some((*x, *y, *width, *height)),
+                "{name} was resized"
+            );
+        }
+    }
+
+    fn output_layouts() -> Vec<(String, i64, i64, u64, u64)> {
+        let output = std::process::Command::new("kscreen-doctor")
+            .arg("-j")
+            .output();
+        let Ok(output) = output else {
+            return Vec::new();
+        };
+        let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+            return Vec::new();
+        };
+        doc.get("outputs")
+            .and_then(|value| value.as_array())
+            .map(|outputs| {
+                outputs
+                    .iter()
+                    .filter_map(|output| {
+                        let name = output.get("name")?.as_str()?.to_string();
+                        let x = output.get("pos")?.get("x")?.as_i64()?;
+                        let y = output.get("pos")?.get("y")?.as_i64()?;
+                        let width = output.get("size")?.get("width")?.as_u64()?;
+                        let height = output.get("size")?.get("height")?.as_u64()?;
+                        Some((name, x, y, width, height))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn paint_marker_on_new_screen() {
+        let dir = scratch_dir().join("frames");
+        let _ = std::fs::create_dir_all(&dir);
+        let marker = marker_jpeg(1280, 720);
+        let path = dir.join("marker.jpg");
+        if std::fs::write(&path, &marker).is_err() {
             return;
         }
-        Pw::load().expect("pipewire symbols");
+        let file = path
+            .display()
+            .to_string()
+            .replace('\\', "\\\\")
+            .replace('\'', "");
+        let script = format!(
+            "var desks = desktops();\n\
+             for (var i = 0; i < desks.length; i++) {{\n\
+             if (desks[i].screen === 0) continue;\n\
+             desks[i].wallpaperPlugin = 'org.kde.image';\n\
+             desks[i].currentConfigGroup = ['Wallpaper', 'org.kde.image', 'General'];\n\
+             desks[i].writeConfig('Image', 'file://{file}');\n\
+             }}\n\
+             'painted ' + desks.length;"
+        );
+        let output = std::process::Command::new("qdbus6")
+            .args([
+                "org.kde.plasmashell",
+                "/PlasmaShell",
+                "org.kde.PlasmaShell.evaluateScript",
+                &script,
+            ])
+            .output();
+        eprintln!(
+            "wallpaper: {}",
+            output
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                .unwrap_or_else(|error| error.to_string())
+        );
+    }
+
+    fn marker_jpeg(width: u32, height: u32) -> Vec<u8> {
+        let mut rgb = vec![20u8; (width * height * 3) as usize];
+        for y in 0..height {
+            for x in 0..width {
+                let index = ((y * width + x) * 3) as usize;
+                if x < 280 && y < 180 {
+                    rgb[index] = 230;
+                    rgb[index + 1] = 40;
+                    rgb[index + 2] = 40;
+                } else if x > width - 300 && y > height - 200 {
+                    rgb[index] = 30;
+                    rgb[index + 1] = 90;
+                    rgb[index + 2] = 220;
+                } else if (x as i32 - y as i32).unsigned_abs() < 8 {
+                    rgb[index] = 240;
+                    rgb[index + 1] = 220;
+                    rgb[index + 2] = 40;
+                }
+            }
+        }
+        let mut payload = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut payload, 95);
+        encoder
+            .encode(&rgb, width, height, image::ExtendedColorType::Rgb8)
+            .expect("marker");
+        payload
+    }
+
+    fn new_output_geometry(before: &[ScreenOutput]) -> Option<(i32, i32, u32, u32)> {
+        let known: std::collections::HashSet<&str> =
+            before.iter().map(|output| output.name.as_str()).collect();
+        let output = std::process::Command::new("kscreen-doctor")
+            .arg("-j")
+            .output()
+            .ok()?;
+        let doc: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+        for output in doc.get("outputs")?.as_array()? {
+            let name = output.get("name")?.as_str()?;
+            if known.contains(name) {
+                continue;
+            }
+            let x = output.get("pos")?.get("x")?.as_i64()? as i32;
+            let y = output.get("pos")?.get("y")?.as_i64()? as i32;
+            let width = output.get("size")?.get("width")?.as_u64()? as u32;
+            let height = output.get("size")?.get("height")?.as_u64()? as u32;
+            return Some((x, y, width, height));
+        }
+        None
+    }
+
+    fn screenshot_output(path: &std::path::Path, geometry: (i32, i32, u32, u32)) {
+        let full = path.with_file_name("live-desktop.png");
+        let status = std::process::Command::new("spectacle")
+            .args(["-b", "-n", "-f", "-o"])
+            .arg(&full)
+            .status()
+            .expect("spectacle");
+        assert!(status.success(), "spectacle did not grab the desktop");
+        let (x, y, width, height) = geometry;
+        let crop = format!("crop={width}:{height}:{x}:{y}");
+        let status = std::process::Command::new("ffmpeg")
+            .env("TMPDIR", scratch_dir())
+            .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&full)
+            .args(["-vf", &crop])
+            .arg(path)
+            .status()
+            .expect("ffmpeg");
+        assert!(status.success(), "could not crop the virtual screen");
+    }
+
+    fn mean_abs_diff(
+        left: &std::path::Path,
+        right: &std::path::Path,
+        dir: &std::path::Path,
+    ) -> f32 {
+        let left_raw = dir.join("live-left.rgb");
+        let right_raw = dir.join("live-right.rgb");
+        decode_rgb(left, &left_raw);
+        decode_rgb(right, &right_raw);
+        let left = std::fs::read(&left_raw).expect("left rgb");
+        let right = std::fs::read(&right_raw).expect("right rgb");
+        assert_eq!(left.len(), right.len(), "the two pictures differ in size");
+        let mut sum = 0u64;
+        for (a, b) in left.iter().zip(right.iter()) {
+            sum += u64::from(a.abs_diff(*b));
+        }
+        sum as f32 / left.len() as f32
+    }
+
+    fn decode_rgb(path: &std::path::Path, raw: &std::path::Path) {
+        let status = std::process::Command::new("ffmpeg")
+            .env("TMPDIR", scratch_dir())
+            .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(path)
+            .args(["-f", "rawvideo", "-pix_fmt", "rgb24"])
+            .arg(raw)
+            .status()
+            .expect("ffmpeg");
+        assert!(status.success(), "could not decode {path:?}");
     }
 }

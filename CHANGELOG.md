@@ -4,6 +4,14 @@ Each app version needs a section in this file. The version is the one in
 `apps/desktop/package.json`. CI rejects a bump that does not add the matching
 section. The release draft uses that section as its body.
 
+## [0.1.5] - 2026-10-24
+
+### Fixed
+
+- The virtual screen picture now comes from GStreamer (`pipewiresrc`, scale, JPEG or H.264). Reading the PipeWire buffers by hand produced a scrambled frame or none.
+- Only the configured frame rate is compressed and sent. The rate can be set up to 120, and the virtual screen runs at that rate. Extra compositor frames are dropped before the encoder.
+- The phone keeps the latest keyframe until the view is ready. Before, that frame was dropped and a still screen never sent another one the decoder could start from.
+
 ## [0.1.4] - 2026-10-24
 
 ### Fixed

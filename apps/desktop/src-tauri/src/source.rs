@@ -38,7 +38,7 @@ impl StreamMode {
         StreamMode {
             width: (self.width.clamp(320, 3840)) & !1,
             height: (self.height.clamp(240, 2160)) & !1,
-            fps: self.fps.clamp(1, 60),
+            fps: self.fps.clamp(1, 120),
             quality: self.quality.clamp(1, 100),
             codec: self.codec,
         }
@@ -173,5 +173,20 @@ mod tests {
         let first = source.next_frame().expect("a frame");
         let second = source.next_frame().expect("a frame");
         assert_ne!(first.payload, second.payload);
+    }
+
+    #[test]
+    fn a_high_frame_rate_is_kept() {
+        let mode = StreamMode {
+            width: 1280,
+            height: 720,
+            fps: 120,
+            quality: 70,
+            codec: 0,
+        }
+        .normalize();
+        assert_eq!(mode.fps, 120);
+        let capped = StreamMode { fps: 240, ..mode }.normalize();
+        assert_eq!(capped.fps, 120);
     }
 }

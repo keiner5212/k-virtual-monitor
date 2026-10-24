@@ -1,6 +1,6 @@
 [package]
 name = "kvm-desktop"
-version = "0.1.3"
+version = "0.1.5"
 description = "k-virtual-monitor desktop server"
 authors = ["k-virtual-monitor"]
 edition = "2021"

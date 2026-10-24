@@ -8,26 +8,19 @@
 
 use rand::RngCore;
 use std::collections::HashMap;
-use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use kvm_protocol::messages::codec;
-use kvm_protocol::messages::FrameHeader;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
 use zbus::{blocking::Connection, proxy};
 
-use crate::source::{EncodedFrame, FrameSource, StreamMode};
-
-/// How long the last picture is repeated when the screen does not change.
-///
-/// The compositor only sends a picture when something on the screen
-/// changes. Without this the phone would wait for a frame that never comes.
-const KEEPALIVE: Duration = Duration::from_millis(500);
+use crate::gstreamer::Encoder;
+use crate::source::{EncodedFrame, FrameSlot, FrameSource, StreamMode};
 
 struct ScreenOutput {
     id: i64,
@@ -61,26 +54,18 @@ impl PortalPermission {
 }
 
 struct Inner {
-    mode: Mutex<StreamMode>,
+    mode: Arc<Mutex<StreamMode>>,
     output: Mutex<Option<ScreenOutput>>,
-    frame: Mutex<Option<(u64, EncodedFrame)>>,
-    cv: Condvar,
+    /// The newest picture of the virtual screen.
+    slot: Arc<FrameSlot>,
     stop: AtomicBool,
     status: Mutex<String>,
     thread: Mutex<Option<JoinHandle<()>>>,
-    started: Instant,
-    seq: AtomicU64,
-    delivered: AtomicU64,
-    /// When the last picture was handed out.
-    last_sent: Mutex<Instant>,
     /// Size and rate last applied to the virtual screen. The portal picks
     /// its own, so the first apply happens even when the mode matches.
     resized: Mutex<Option<(u16, u16, u16)>>,
-    /// When the last frame was produced. A screen with nothing on it produces
-    /// no frames at all.
-    last_frame: Mutex<Option<Instant>>,
-    /// The GStreamer process. Stop kills it so the read unblocks.
-    gst_pid: AtomicU32,
+    /// The encoder of the picture. It is stopped when the capture ends.
+    encoder: Mutex<Option<Encoder>>,
 }
 
 pub struct VirtualSource {
@@ -90,20 +75,14 @@ pub struct VirtualSource {
 impl VirtualSource {
     pub fn start(mode: StreamMode) -> Self {
         let inner = Arc::new(Inner {
-            mode: Mutex::new(mode.normalize()),
+            mode: Arc::new(Mutex::new(mode.normalize())),
             output: Mutex::new(None),
-            frame: Mutex::new(None),
-            cv: Condvar::new(),
+            slot: Arc::new(FrameSlot::new()),
             stop: AtomicBool::new(false),
             status: Mutex::new("Accept the prompt. It adds a new screen.".to_string()),
             thread: Mutex::new(None),
-            started: Instant::now(),
-            seq: AtomicU64::new(0),
-            delivered: AtomicU64::new(0),
-            last_sent: Mutex::new(Instant::now() - Duration::from_secs(1)),
             resized: Mutex::new(None),
-            last_frame: Mutex::new(None),
-            gst_pid: AtomicU32::new(0),
+            encoder: Mutex::new(None),
         });
         inner.spawn();
         VirtualSource { inner }
@@ -122,11 +101,7 @@ impl FrameSource for VirtualSource {
     }
 
     fn codecs(&self) -> u16 {
-        if gstreamer_h264() {
-            codec::H264 | codec::JPEG
-        } else {
-            codec::JPEG
-        }
+        codec::H264
     }
 
     fn mode(&self) -> StreamMode {
@@ -175,15 +150,9 @@ impl FrameSource for VirtualSource {
             return stored;
         }
         // The compositor only sends a picture when something on the screen
-        // changes. The last one is repeated, so the phone always has a
-        // picture, but the first one has to arrive before that.
-        let ready = self
-            .inner
-            .last_frame
-            .lock()
-            .expect("last frame is not poisoned")
-            .is_some();
-        if ready {
+        // changes. The encoder repeats the last one, so the phone always has
+        // a picture, but the first one has to arrive before that.
+        if self.inner.slot.has_frame() {
             "The virtual screen is streaming.".to_string()
         } else {
             "Waiting for the first picture of the virtual screen.".to_string()
@@ -197,11 +166,14 @@ impl FrameSource for VirtualSource {
 
     fn stop(&self) {
         self.inner.stop.store(true, Ordering::Relaxed);
-        let pid = self.inner.gst_pid.load(Ordering::Acquire);
-        if pid != 0 {
-            let _ = Command::new("kill")
-                .args(["-TERM", &pid.to_string()])
-                .status();
+        if let Some(encoder) = self
+            .inner
+            .encoder
+            .lock()
+            .expect("encoder is not poisoned")
+            .take()
+        {
+            encoder.stop();
         }
     }
 }
@@ -245,32 +217,20 @@ impl Inner {
     }
 
     fn next_frame(&self) -> Option<EncodedFrame> {
-        loop {
-            if self.stop.load(Ordering::Relaxed) {
-                return None;
-            }
-            let delivered = self.delivered.load(Ordering::Relaxed);
-            let guard = self.frame.lock().expect("frame slot is not poisoned");
-            if let Some((seq, frame)) = guard.as_ref() {
-                let mut last_sent = self.last_sent.lock().expect("last frame is not poisoned");
-                if *seq != delivered || last_sent.elapsed() >= KEEPALIVE {
-                    self.delivered.store(*seq, Ordering::Relaxed);
-                    *last_sent = Instant::now();
-                    *self.last_frame.lock().expect("last frame is not poisoned") =
-                        Some(Instant::now());
-                    let frame = frame.clone();
-                    return Some(frame);
-                }
-            }
-            let (_guard, _) = self
-                .cv
-                .wait_timeout(guard, Duration::from_millis(100))
-                .expect("frame slot is not poisoned");
+        if self.stop.load(Ordering::Relaxed) {
+            return None;
         }
+        self.slot.next_frame()
     }
 
     fn capture(self: &Arc<Self>) -> Result<(), String> {
         self.set_status("Accept the prompt. It adds a new screen.");
+        if !gstreamer_h264() {
+            return Err(
+                "H.264 is not available. Install the GStreamer plugin x264 (gstreamer1.0-plugins-ugly)"
+                    .to_string(),
+            );
+        }
         let before = list_outputs();
         let connection = Connection::session().map_err(|error| error.to_string())?;
         let permission_path = crate::config::portal_permission_path();
@@ -642,86 +602,7 @@ trait Session {
     fn close(&self) -> zbus::Result<()>;
 }
 
-const GST_CAPTURE: &str = r#####"
-import struct, sys, threading
-import gi
-gi.require_version("Gst", "1.0")
-gi.require_version("GLib", "2.0")
-from gi.repository import GLib, Gst
-
-Gst.init(None)
-node = int(sys.argv[1])
-width = int(sys.argv[2])
-height = int(sys.argv[3])
-fps = max(1, int(sys.argv[4]))
-quality = max(1, min(100, int(sys.argv[5])))
-codec = sys.argv[6]
-if codec == "h264":
-    qp = max(18, min(40, 51 - quality * 33 // 100))
-    enc = (
-        f"x264enc tune=zerolatency speed-preset=ultrafast "
-        f"key-int-max={fps} bframes=0 byte-stream=true quantizer={qp} "
-        f"rc-lookahead=0 sync-lookahead=0 sliced-threads=true ! "
-        f"h264parse config-interval=-1 ! "
-        f"video/x-h264,stream-format=byte-stream,alignment=au ! "
-    )
-else:
-    enc = f"jpegenc quality={quality} idct-method=ifast ! "
-desc = (
-    f"pipewiresrc path={node} ! "
-    f"videoconvert ! videoscale method=0 ! "
-    f"videorate drop-only=true skip-to-first=true ! "
-    f"video/x-raw,width={width},height={height},framerate={fps}/1,format=I420 ! "
-    f"{enc}"
-    f"appsink name=sink emit-signals=true max-buffers=1 drop=true sync=false"
-)
-pipeline = Gst.parse_launch(desc)
-sink = pipeline.get_by_name("sink")
-out = sys.stdout.buffer
-lock = threading.Lock()
-
-def on_sample(element):
-    sample = element.emit("pull-sample")
-    if sample is None:
-        return Gst.FlowReturn.OK
-    buf = sample.get_buffer()
-    ok, info = buf.map(Gst.MapFlags.READ)
-    if not ok:
-        return Gst.FlowReturn.OK
-    try:
-        data = bytes(info.data)
-    finally:
-        buf.unmap(info)
-    key = 0 if buf.has_flags(Gst.BufferFlags.DELTA_UNIT) else 1
-    header = struct.pack("<4sIBHH", b"KVMF", len(data), key, width, height)
-    with lock:
-        out.write(header + data)
-        out.flush()
-    return Gst.FlowReturn.OK
-
-sink.connect("new-sample", on_sample)
-loop = GLib.MainLoop()
-bus = pipeline.get_bus()
-bus.add_signal_watch()
-
-def on_bus(_bus, message):
-    if message.type == Gst.MessageType.ERROR:
-        err, debug = message.parse_error()
-        print(f"gstreamer: {err} {debug}", file=sys.stderr, flush=True)
-        loop.quit()
-    elif message.type == Gst.MessageType.EOS:
-        loop.quit()
-
-bus.connect("message", on_bus)
-if pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
-    print("gstreamer: pipeline did not start", file=sys.stderr, flush=True)
-    sys.exit(1)
-try:
-    loop.run()
-finally:
-    pipeline.set_state(Gst.State.NULL)
-"#####;
-
+/// True when the GStreamer plugin that encodes H.264 is installed.
 fn gstreamer_h264() -> bool {
     static READY: OnceLock<bool> = OnceLock::new();
     *READY.get_or_init(|| {
@@ -740,170 +621,45 @@ fn gstreamer_h264() -> bool {
     })
 }
 
+/// Encodes the virtual screen until the capture ends.
+///
+/// The encoder keeps the rate of the mode, even when the compositor does not
+/// paint anything: the last picture is repeated before the encoder, so the
+/// phone always has a picture and the stream never stops.
 fn stream_node(inner: &Arc<Inner>, node: u32) -> Result<(), String> {
-    while !inner.stop.load(Ordering::Relaxed) {
-        let mode = *inner.mode.lock().expect("stream mode is not poisoned");
-        let mut child = spawn_capture(node, mode)?;
-        inner.gst_pid.store(child.id(), Ordering::Release);
-        let stdout = child.stdout.take().ok_or("capture has no picture output")?;
-        let stderr = child.stderr.take();
-        let logged = thread::spawn(move || stderr.map(drain_stderr).unwrap_or_default());
-        let reading = Arc::clone(inner);
-        let reader = thread::spawn(move || read_frames(stdout, &reading));
-        let mut exited = false;
-        loop {
-            if inner.stop.load(Ordering::Relaxed) {
-                break;
-            }
-            let now = *inner.mode.lock().expect("stream mode is not poisoned");
-            if capture_changed(mode, now) {
-                break;
-            }
-            match child.try_wait() {
-                Ok(Some(_)) => {
-                    exited = true;
-                    break;
-                }
-                Ok(None) => {}
-                Err(_) => break,
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-        inner.gst_pid.store(0, Ordering::Release);
-        let _ = reader.join();
-        let error = logged.join().unwrap_or_default();
-        if inner.stop.load(Ordering::Relaxed) || capture_changed(mode, inner.current_mode()) {
-            continue;
-        }
-        if exited {
-            if error.is_empty() {
-                return Err("gstreamer stopped".to_string());
-            }
-            return Err(error);
-        }
-    }
-    Ok(())
-}
-
-fn capture_changed(started: StreamMode, now: StreamMode) -> bool {
-    started.width != now.width
-        || started.height != now.height
-        || started.fps != now.fps
-        || started.quality != now.quality
-        || started.codec != now.codec
-}
-
-impl Inner {
-    fn current_mode(&self) -> StreamMode {
-        *self.mode.lock().expect("stream mode is not poisoned")
-    }
-}
-
-fn spawn_capture(node: u32, mode: StreamMode) -> Result<std::process::Child, String> {
-    let codec = if mode.codec == codec::H264 {
-        "h264"
-    } else {
-        "jpeg"
-    };
-    let node = node.to_string();
-    let width = mode.width.to_string();
-    let height = mode.height.to_string();
-    let fps = mode.fps.to_string();
-    let quality = mode.quality.to_string();
-    let mut child = Command::new("python3")
-        .args(["-", &node, &width, &height, &fps, &quality, codec])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("python3 is not available: {error}"))?;
-    let mut stdin = child.stdin.take().ok_or("capture has no input")?;
-    stdin
-        .write_all(GST_CAPTURE.as_bytes())
-        .map_err(|error| error.to_string())?;
-    drop(stdin);
-    Ok(child)
-}
-
-fn drain_stderr(mut stderr: impl Read) -> String {
-    let mut kept = Vec::new();
-    let mut chunk = [0u8; 4096];
+    let encoder = Encoder::start(
+        format!("pipewiresrc path={node}"),
+        Arc::clone(&inner.mode),
+        Arc::clone(&inner.slot),
+    );
+    *inner.encoder.lock().expect("encoder is not poisoned") = Some(encoder);
     loop {
-        match stderr.read(&mut chunk) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                kept.extend_from_slice(&chunk[..n]);
-                if kept.len() > 4000 {
-                    let extra = kept.len() - 4000;
-                    kept.drain(..extra);
-                }
+        if inner.stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let failed = {
+            let guard = inner.encoder.lock().expect("encoder is not poisoned");
+            match guard.as_ref() {
+                Some(encoder) => encoder.failed(),
+                None => false,
             }
-        }
-    }
-    String::from_utf8_lossy(&kept).trim().to_string()
-}
-
-fn read_frames(mut stdout: impl Read, inner: &Inner) {
-    loop {
-        let mut header = [0u8; 13];
-        if stdout.read_exact(&mut header).is_err() {
-            return;
-        }
-        if &header[0..4] != b"KVMF" {
-            return;
-        }
-        let len = u32::from_le_bytes(header[4..8].try_into().unwrap_or([0; 4])) as usize;
-        if len == 0 || len > 8 * 1024 * 1024 {
-            return;
-        }
-        let keyframe = header[8] != 0;
-        let width = u32::from(u16::from_le_bytes(
-            header[9..11].try_into().unwrap_or([0; 2]),
-        ));
-        let height = u32::from(u16::from_le_bytes(
-            header[11..13].try_into().unwrap_or([0; 2]),
-        ));
-        let mut payload = vec![0u8; len];
-        if stdout.read_exact(&mut payload).is_err() {
-            return;
-        }
-        let codec_bit = if payload_is_jpeg(&payload) {
-            codec::JPEG
-        } else {
-            codec::H264
         };
-        publish(inner, width, height, codec_bit, keyframe, payload);
+        if failed {
+            let error = inner
+                .encoder
+                .lock()
+                .expect("encoder is not poisoned")
+                .as_ref()
+                .map(|encoder| encoder.error())
+                .unwrap_or_default();
+            return Err(if error.is_empty() {
+                "the encoder stopped".to_string()
+            } else {
+                error
+            });
+        }
+        thread::sleep(Duration::from_millis(100));
     }
-}
-
-fn payload_is_jpeg(payload: &[u8]) -> bool {
-    payload.starts_with(&[0xff, 0xd8])
-}
-
-fn publish(
-    inner: &Inner,
-    width: u32,
-    height: u32,
-    codec_bit: u16,
-    keyframe: bool,
-    payload: Vec<u8>,
-) {
-    let seq = inner.seq.fetch_add(1, Ordering::Relaxed) + 1;
-    *inner.last_frame.lock().expect("last frame is not poisoned") = Some(Instant::now());
-    let frame = EncodedFrame {
-        header: FrameHeader {
-            pts_ms: inner.started.elapsed().as_millis() as u64,
-            keyframe,
-            width: width as u16,
-            height: height as u16,
-            codec: codec::wire_value(codec_bit),
-        },
-        payload: std::sync::Arc::new(payload),
-    };
-    *inner.frame.lock().expect("frame slot is not poisoned") = Some((seq, frame));
-    inner.cv.notify_one();
 }
 
 #[cfg(test)]
@@ -916,15 +672,7 @@ mod tests {
             let _ = std::fs::create_dir_all(&path);
             return path;
         }
-        let compiled = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../.tmp");
-        if std::fs::create_dir_all(&compiled).is_ok() {
-            return compiled;
-        }
-        let local = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .join(".tmp");
-        let _ = std::fs::create_dir_all(&local);
-        local
+        crate::scratch_dir()
     }
 
     #[test]
@@ -970,7 +718,7 @@ mod tests {
             height: 720,
             fps: 5,
             quality: 90,
-            codec: codec::JPEG,
+            codec: codec::H264,
         };
         let before = list_outputs();
         let laptop = output_layouts();
@@ -1018,19 +766,14 @@ mod tests {
         let frame = frames.last().unwrap_or_else(|| {
             panic!("no frame from the virtual screen ({status})");
         });
-        assert_eq!(frame.header.codec, codec::wire_value(codec::JPEG));
-        assert!(frame.payload.starts_with(&[0xff, 0xd8]));
-        let live = dir.join("live-virtual.jpg");
-        std::fs::write(&live, frame.payload.as_slice()).expect("live jpeg");
-        let decoded = image::load_from_memory(&frame.payload)
-            .expect("the live frame is not a jpeg")
-            .to_rgb8();
+        assert_eq!(frame.header.codec, codec::wire_value(codec::H264));
+        assert!(frame.payload.starts_with(&[0x00, 0x00, 0x01]));
+        let live = dir.join("live-virtual.h264");
+        std::fs::write(&live, frame.payload.as_slice()).expect("live picture");
         assert_eq!(
-            decoded.dimensions(),
-            (
-                u32::from(frame.header.width),
-                u32::from(frame.header.height)
-            )
+            (frame.header.width, frame.header.height),
+            (1280, 720),
+            "the picture does not have the size of the stream"
         );
         geometry.expect("the new output has no geometry");
         let reference = dir.join("live-reference.png");

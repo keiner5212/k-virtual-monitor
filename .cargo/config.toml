@@ -1,2 +1,4 @@
-[env]
-CARGO_TARGET_DIR = { value = ".tmp/target", relative = true }
+[build]
+# The build of the workspace goes to the .tmp folder of the workspace, never
+# to a system folder.
+target-dir = ".tmp/target"

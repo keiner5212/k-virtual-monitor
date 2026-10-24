@@ -22,10 +22,14 @@ pub struct ServerConfig {
     pub height: u16,
     /// Target frame rate.
     pub fps: u16,
-    /// JPEG quality used by the fallback codec.
+    /// Quality of the stream. The encoder turns it into the quantizer of the
+    /// H.264 pictures.
     pub jpeg_quality: u8,
-    /// Preferred codec: `h264` or `jpeg`.
-    pub codec: String,
+    /// The codec of the stream. It was a choice between `h264` and `jpeg`.
+    /// Every picture of the stream is compressed with H.264 now, so the value
+    /// is read and ignored, and a configuration without it works too.
+    #[serde(default)]
+    pub codec: Option<String>,
     /// Maximum number of authenticated sessions at the same time.
     pub max_sessions: usize,
     /// Maximum number of handshakes in progress at the same time.
@@ -46,7 +50,7 @@ impl Default for ServerConfig {
             height: 792,
             fps: 20,
             jpeg_quality: 70,
-            codec: "h264".to_string(),
+            codec: None,
             max_sessions: 4,
             max_pending_handshakes: 8,
             handshake_timeout_secs: 10,

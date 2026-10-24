@@ -1,9 +1,9 @@
 /**
  * The settings screen.
  *
- * The compression section shows what the phone asks for and what the server
- * actually chose, so the user can tell whether the stream is compressed and
- * whether it is decoded in hardware.
+ * The compression section shows what the server actually chose, so the user
+ * can tell whether the stream is compressed and whether it is decoded in
+ * hardware.
  */
 
 import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
@@ -11,8 +11,8 @@ import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
 import { codecFromWire, codecName, Codec, type DisplayInfo } from "@kvm/protocol";
 
 import type { StoredPairing } from "../lib/pairing";
-import { CODEC_PREFERENCES, type AppSettings, type CodecPreference } from "../lib/settings";
-import { Chip, colors, radius, Row, Section, Segmented, space, ToggleRow, type } from "../ui";
+import type { AppSettings } from "../lib/settings";
+import { Chip, colors, radius, Row, Section, space, ToggleRow, type } from "../ui";
 
 interface SettingsScreenProps {
     settings: AppSettings;
@@ -31,13 +31,6 @@ export default function SettingsScreen({
     onUnpair,
 }: SettingsScreenProps) {
     const detected = streamInfo === null ? null : codecFromWire(streamInfo.codec);
-    const preference = CODEC_PREFERENCES.find(
-        (option) => option.value === settings.codecPreference,
-    );
-    const mismatch =
-        detected !== null &&
-        settings.codecPreference !== "auto" &&
-        detected !== codecBit(settings.codecPreference);
     const live = streamInfo !== null;
     const valueStyle = live ? type.mono : type.monoMuted;
 
@@ -45,14 +38,8 @@ export default function SettingsScreen({
         <View style={styles.root}>
             <Section
                 title="Compression"
-                hint="The server picks the most compressed codec both ends support."
+                hint="Every picture of the stream is compressed with H.264 and decoded in the hardware of the phone."
             >
-                <Segmented<CodecPreference>
-                    options={CODEC_PREFERENCES.map((option) => ({ value: option.value, label: option.label }))}
-                    value={settings.codecPreference}
-                    onChange={(codecPreference) => onChange({ ...settings, codecPreference })}
-                    accessibilityLabel="Compression"
-                />
                 <View style={styles.detected}>
                     <Text style={type.caption}>Detected</Text>
                     <View style={styles.detectedRow}>
@@ -62,14 +49,6 @@ export default function SettingsScreen({
                         {detected !== null ? <DecoderChip codec={detected} /> : null}
                     </View>
                     <Text style={type.caption}>{detected === null ? "not connected yet" : decoderNote(detected)}</Text>
-                    {mismatch ? (
-                        <Text style={[type.caption, styles.mismatch]}>
-                            The desktop chose a different codec.
-                        </Text>
-                    ) : null}
-                </View>
-                <View style={styles.hintBox}>
-                    <Text style={type.caption}>{preference?.hint}</Text>
                 </View>
             </Section>
 
@@ -137,25 +116,9 @@ export default function SettingsScreen({
     );
 }
 
-function codecBit(preference: CodecPreference): number {
-    switch (preference) {
-        case "h264":
-            return Codec.H264;
-        case "h265":
-            return Codec.H265;
-        case "jpeg":
-            return Codec.JPEG;
-        default:
-            return 0;
-    }
-}
-
 function DecoderChip({ codec }: { codec: number }) {
     if (codec === Codec.H264 || codec === Codec.H265) {
         return <Chip label="hardware" tone="ok" />;
-    }
-    if (codec === Codec.JPEG) {
-        return <Chip label="software" tone="warn" />;
     }
     return null;
 }
@@ -163,9 +126,6 @@ function DecoderChip({ codec }: { codec: number }) {
 function decoderNote(codec: number): string {
     if (codec === Codec.H264 || codec === Codec.H265) {
         return "decoded in hardware, the usual choice";
-    }
-    if (codec === Codec.JPEG) {
-        return "decoded in software, the most bandwidth";
     }
     return "the decoder is not reported";
 }

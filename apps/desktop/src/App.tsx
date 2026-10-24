@@ -438,6 +438,9 @@ export default function App() {
                                         >
                                             {device.name}
                                             {device.connected ? " · live" : ""}
+                                            <span className="ml-2 font-mono text-xs text-ink-muted">
+                                                {device.id.slice(0, 6)}
+                                            </span>
                                         </button>
                                         <button
                                             type="button"
@@ -504,7 +507,7 @@ export default function App() {
                                             </div>
                                             <div>
                                                 <label className={labelClass} htmlFor={`quality-${device.id}`}>
-                                                    JPEG quality
+                                                    Quality
                                                 </label>
                                                 <div className="flex items-center gap-3">
                                                     <input

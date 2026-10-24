@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod devices;
+pub mod gstreamer;
 pub mod server;
 pub mod source;
 mod virtual_output;
@@ -30,6 +31,15 @@ const PAIRING_TTL_SECONDS: u64 = 300;
 
 /// The name of a device that has not connected yet.
 const PENDING_DEVICE_NAME: &str = "pending phone";
+
+/// The folder of the workspace where the temporary files are written.
+///
+/// It is never a system folder: the workspace keeps everything it builds.
+pub fn scratch_dir() -> PathBuf {
+    let local = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../.tmp");
+    let _ = std::fs::create_dir_all(&local);
+    local
+}
 
 pub struct AppState {
     server: Arc<Server>,
@@ -82,11 +92,7 @@ fn server_status(state: State<'_, AppState>) -> ServerStatus {
         port: state.config.port,
         address: local_address(),
         sessions: state.server.sessions(),
-        paired_devices: state
-            .store
-            .lock()
-            .expect("store is not poisoned")
-            .paired_count(),
+        paired_devices: devices::lock_store(&state.store).paired_count(),
         codec: session
             .as_ref()
             .map(|info| kvm_protocol::messages::codec::name(info.codec).to_uppercase()),
@@ -114,14 +120,14 @@ fn save_config(config: ServerConfig) -> Result<ServerConfig, String> {
 
 #[tauri::command]
 fn create_pairing(state: State<'_, AppState>) -> Result<PairingInfo, String> {
-    let mut store = state.store.lock().expect("store is not poisoned");
+    let mut store = devices::lock_store(&state.store);
     create_pairing_entry(&state.config, &mut store, &state.store_path)
 }
 
 /// The pairing code that is alive right now, if there is one.
 #[tauri::command]
 fn current_pairing(state: State<'_, AppState>) -> Result<Option<PairingInfo>, String> {
-    let mut store = state.store.lock().expect("store is not poisoned");
+    let mut store = devices::lock_store(&state.store);
     refresh(&mut store, &state.store_path);
     let now = unix_now();
     prune(&mut store, &state.store_path, now);
@@ -182,7 +188,7 @@ pub fn print_pairing() -> Result<(), String> {
 /// The phones that completed the handshake.
 #[tauri::command]
 fn paired_devices(state: State<'_, AppState>) -> Vec<DeviceInfo> {
-    let mut store = state.store.lock().expect("store is not poisoned");
+    let mut store = devices::lock_store(&state.store);
     refresh(&mut store, &state.store_path);
     prune(&mut store, &state.store_path, unix_now());
     store
@@ -221,7 +227,7 @@ fn paired_devices(state: State<'_, AppState>) -> Vec<DeviceInfo> {
 /// again, not even with the code it kept.
 #[tauri::command]
 fn revoke_device(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let mut store = state.store.lock().expect("store is not poisoned");
+    let mut store = devices::lock_store(&state.store);
     refresh(&mut store, &state.store_path);
     if !store.remove(&id) {
         return Err("no such device".to_string());
@@ -256,7 +262,7 @@ fn save_device_settings(
         codec: 0,
     }
     .normalize();
-    let mut store = state.store.lock().expect("store is not poisoned");
+    let mut store = devices::lock_store(&state.store);
     refresh(&mut store, &state.store_path);
     let Some(mut entry) = store.find(&settings.id).cloned() else {
         return Err("no such device".to_string());
@@ -322,7 +328,7 @@ pub fn default_source(config: &ServerConfig) -> Arc<dyn FrameSource> {
         height: config.height,
         fps: config.fps,
         quality: config.jpeg_quality,
-        codec: kvm_protocol::messages::codec::JPEG,
+        codec: kvm_protocol::messages::codec::H264,
     }
     .normalize();
     if std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var_os("KVM_SYNTHETIC").is_none()

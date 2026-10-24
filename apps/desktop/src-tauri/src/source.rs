@@ -7,10 +7,13 @@
 //! a desktop session.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use kvm_protocol::messages::codec;
 use kvm_protocol::messages::FrameHeader;
+
+use crate::gstreamer::Encoder;
 
 /// An encoded frame, ready to be sealed and sent.
 #[derive(Clone)]
@@ -33,7 +36,7 @@ pub struct StreamMode {
 }
 
 impl StreamMode {
-    /// Keeps the mode inside what a virtual output and a JPEG frame can carry.
+    /// Keeps the mode inside what a virtual output and a frame can carry.
     pub fn normalize(self) -> Self {
         StreamMode {
             width: (self.width.clamp(320, 3840)) & !1,
@@ -52,7 +55,7 @@ pub trait FrameSource: Send + Sync {
 
     /// The codecs this source can produce, as a bit mask.
     fn codecs(&self) -> u16 {
-        codec::JPEG
+        codec::H264
     }
 
     /// The mode the next frames should follow.
@@ -74,27 +77,97 @@ pub trait FrameSource: Send + Sync {
     fn stop(&self) {}
 }
 
-/// A test pattern, encoded as JPEG.
+/// The newest picture of a source.
+///
+/// Only the newest picture is kept: a picture that is late is worth less than
+/// the one that replaced it.
+pub struct FrameSlot {
+    frame: Mutex<Option<(u64, EncodedFrame)>>,
+    signal: Condvar,
+    seq: AtomicU64,
+    delivered: AtomicU64,
+    started: Instant,
+}
+
+impl FrameSlot {
+    pub fn new() -> Self {
+        FrameSlot {
+            frame: Mutex::new(None),
+            signal: Condvar::new(),
+            seq: AtomicU64::new(0),
+            delivered: AtomicU64::new(0),
+            started: Instant::now(),
+        }
+    }
+
+    /// Stores a new picture.
+    pub fn publish(&self, mut frame: EncodedFrame) {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        frame.header.pts_ms = self.started.elapsed().as_millis() as u64;
+        *self.frame.lock().expect("frame slot is not poisoned") = Some((seq, frame));
+        self.signal.notify_one();
+    }
+
+    /// The next picture, waiting for one to arrive.
+    pub fn next_frame(&self) -> Option<EncodedFrame> {
+        loop {
+            let delivered = self.delivered.load(Ordering::Relaxed);
+            let guard = self.frame.lock().expect("frame slot is not poisoned");
+            if let Some((seq, frame)) = guard.as_ref() {
+                if *seq != delivered {
+                    self.delivered.store(*seq, Ordering::Relaxed);
+                    return Some(frame.clone());
+                }
+            }
+            let (_guard, _) = self
+                .signal
+                .wait_timeout(guard, Duration::from_millis(100))
+                .expect("frame slot is not poisoned");
+        }
+    }
+
+    /// True when a picture arrived already.
+    pub fn has_frame(&self) -> bool {
+        self.frame
+            .lock()
+            .expect("frame slot is not poisoned")
+            .is_some()
+    }
+}
+
+impl Default for FrameSlot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A test pattern, encoded as H.264.
 ///
 /// It exists so the server, the protocol and the phone can be tested end to
 /// end without a compositor.
 pub struct SyntheticSource {
-    mode: std::sync::Mutex<StreamMode>,
-    counter: AtomicU64,
+    mode: Arc<Mutex<StreamMode>>,
+    encoder: Encoder,
 }
 
 impl SyntheticSource {
     pub fn new(width: u16, height: u16, quality: u8) -> Self {
-        SyntheticSource {
-            mode: std::sync::Mutex::new(StreamMode {
+        let mode = Arc::new(Mutex::new(
+            StreamMode {
                 width,
                 height,
                 fps: 20,
                 quality,
-                codec: codec::JPEG,
-            }),
-            counter: AtomicU64::new(0),
-        }
+                codec: codec::H264,
+            }
+            .normalize(),
+        ));
+        let encoder = Encoder::start(
+            "videotestsrc pattern=smpte".to_string(),
+            Arc::clone(&mode),
+            Arc::new(FrameSlot::new()),
+        );
+        SyntheticSource { mode, encoder }
     }
 }
 
@@ -115,42 +188,11 @@ impl FrameSource for SyntheticSource {
     }
 
     fn next_frame(&self) -> Option<EncodedFrame> {
-        let index = self.counter.fetch_add(1, Ordering::Relaxed);
-        let mode = self.mode();
-        let width = mode.width as u32;
-        let height = mode.height as u32;
-        let mut rgb = vec![0u8; (width * height * 3) as usize];
-        let bar = (index % 120) as u32;
-        for y in 0..height {
-            for x in 0..width {
-                let offset = ((y * width + x) * 3) as usize;
-                let in_bar =
-                    (y / 20) % 2 == 0 && x >= bar * width / 120 && x < (bar + 20) * width / 120;
-                let shade = (y * 255 / height.max(1)) as u8;
-                rgb[offset] = if in_bar { 255 } else { shade };
-                rgb[offset + 1] = if in_bar { 96 } else { shade / 2 };
-                rgb[offset + 2] = if in_bar { 0 } else { 255 - shade };
-            }
-        }
-        let mut payload = Vec::new();
-        let mut encoder =
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut payload, mode.quality);
-        if encoder
-            .encode(&rgb, width, height, image::ExtendedColorType::Rgb8)
-            .is_err()
-        {
-            return None;
-        }
-        Some(EncodedFrame {
-            header: FrameHeader {
-                pts_ms: index * 50,
-                keyframe: true,
-                width: mode.width,
-                height: mode.height,
-                codec: codec::wire_value(codec::JPEG),
-            },
-            payload: Arc::new(payload),
-        })
+        self.encoder.next_frame()
+    }
+
+    fn stop(&self) {
+        self.encoder.stop();
     }
 }
 
@@ -159,20 +201,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_synthetic_source_produces_jpeg_frames() {
-        let source = SyntheticSource::new(64, 48, 70);
-        let frame = source.next_frame().expect("a frame");
-        assert!(frame.payload.len() > 100);
-        assert_eq!(&frame.payload[0..2], &[0xff, 0xd8]);
-        assert_eq!(frame.header.codec, codec::wire_value(codec::JPEG));
-    }
-
-    #[test]
-    fn consecutive_frames_differ() {
-        let source = SyntheticSource::new(64, 48, 70);
-        let first = source.next_frame().expect("a frame");
-        let second = source.next_frame().expect("a frame");
-        assert_ne!(first.payload, second.payload);
+    fn a_frame_slot_keeps_the_newest_picture() {
+        let slot = FrameSlot::new();
+        let frame = EncodedFrame {
+            header: FrameHeader {
+                pts_ms: 0,
+                keyframe: true,
+                width: 64,
+                height: 48,
+                codec: codec::wire_value(codec::H264),
+            },
+            payload: Arc::new(vec![1, 2, 3]),
+        };
+        slot.publish(frame.clone());
+        let first = slot.next_frame().expect("a frame");
+        assert_eq!(first.payload.len(), 3);
+        assert!(first.header.pts_ms < 1000);
     }
 
     #[test]

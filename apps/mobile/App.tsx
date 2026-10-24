@@ -1,6 +1,6 @@
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { BackHandler, Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { BackHandler, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 
@@ -9,7 +9,7 @@ import { decoderAvailable, KvmVideoView, type KvmVideoRef } from "kvm-decoder";
 
 import { clearPairing, loadPairing, savePairing, type StoredPairing } from "./src/lib/pairing";
 import { ensureCsprng } from "./src/lib/random";
-import { DEFAULT_SETTINGS, loadSettings, saveSettings, setHardwareDecoder, type AppSettings } from "./src/lib/settings";
+import { DEFAULT_SETTINGS, loadSettings, saveSettings, type AppSettings } from "./src/lib/settings";
 import type { Frame } from "./src/lib/frames";
 import { useSession } from "./src/lib/useSession";
 import HomeScreen from "./src/screens/HomeScreen";
@@ -45,7 +45,6 @@ function Monitor() {
     useEffect(() => {
         void (async () => {
             ensureCsprng();
-            setHardwareDecoder(decoderAvailable());
             const storedPairing = await loadPairing();
             const stored = await loadSettings(storedPairing?.deviceId ?? null);
             setSettings(stored);
@@ -56,7 +55,6 @@ function Monitor() {
 
     const session = useSession({
         pairing,
-        settings,
         active: route === "session",
         openId,
         reloadToken,
@@ -74,13 +72,7 @@ function Monitor() {
     }, [session.state, settings.keepAwake]);
 
     const updateSettings = useCallback((next: AppSettings) => {
-        setSettings((prev) => {
-            const streamChanged = prev.codecPreference !== next.codecPreference;
-            if (streamChanged) {
-                setReloadToken((token) => token + 1);
-            }
-            return next;
-        });
+        setSettings(next);
         if (pairing) {
             void saveSettings(pairing.deviceId, next);
         }
@@ -112,20 +104,10 @@ function Monitor() {
         }
     }, []);
 
-    const h264Fallback = useRef(false);
-    const failH264 = useCallback(() => {
-        if (h264Fallback.current || settings.codecPreference === "jpeg") {
-            return;
-        }
-        h264Fallback.current = true;
-        updateSettings({ ...settings, codecPreference: "jpeg" });
-    }, [settings, updateSettings]);
-
-    useEffect(() => {
-        if (settings.codecPreference === "h264" || settings.codecPreference === "auto") {
-            h264Fallback.current = false;
-        }
-    }, [settings.codecPreference]);
+    const [decodeFailure, setDecodeFailure] = useState<string | null>(null);
+    const failDecoder = useCallback((message: string) => {
+        setDecodeFailure((current) => current ?? message);
+    }, []);
 
     const unpair = useCallback(async () => {
         await clearPairing();
@@ -206,8 +188,23 @@ function Monitor() {
 
             {tab === "screen" ? (
                 <View style={styles.stage}>
-                    {connected && session.frame ? (
-                        <Picture frame={session.frame} onH264Failed={failH264} />
+                    {decodeFailure ? (
+                        <View style={styles.stateBlock}>
+                            <Text style={type.title}>The picture cannot be shown</Text>
+                            <Text style={[type.body, styles.stateDetail]}>{decodeFailure}</Text>
+                            <Pressable
+                                accessibilityRole="button"
+                                style={styles.action}
+                                onPress={() => {
+                                    setDecodeFailure(null);
+                                    setReloadToken((token) => token + 1);
+                                }}
+                            >
+                                <Text style={styles.actionLabel}>Try again</Text>
+                            </Pressable>
+                        </View>
+                    ) : connected && session.frame ? (
+                        <Picture frame={session.frame} onDecodeError={failDecoder} />
                     ) : down ? (
                         <View style={styles.stateBlock}>
                             <Text style={type.title}>Open the app on the PC</Text>
@@ -270,7 +267,7 @@ function Monitor() {
                         settings={settings}
                         onChange={updateSettings}
                         pairing={pairing}
-                        streamInfo={session.info}                        onUnpair={() => void unpair()}
+                        streamInfo={session.info} onUnpair={() => void unpair()}
                     />
                 </ScrollView>
             )}
@@ -317,9 +314,8 @@ function TabButton({
 }
 
 const H264_WIRE = codecWireValue(Codec.H264);
-const JPEG_WIRE = codecWireValue(Codec.JPEG);
 
-function Picture({ frame, onH264Failed }: { frame: Frame; onH264Failed: () => void }) {
+function Picture({ frame, onDecodeError }: { frame: Frame; onDecodeError: (message: string) => void }) {
     const video = useRef<KvmVideoRef>(null);
     const h264 = frame.codec === H264_WIRE;
 
@@ -328,27 +324,24 @@ function Picture({ frame, onH264Failed }: { frame: Frame; onH264Failed: () => vo
             return;
         }
         if (!decoderAvailable()) {
-            onH264Failed();
+            onDecodeError("This build of the app has no H.264 decoder.");
             return;
         }
         const view = video.current;
         if (!view) {
             return;
         }
-        void view.pushFrame(toBase64(frame.data), frame.keyframe, frame.width, frame.height).catch(() => {
-            onH264Failed();
+        void view.pushFrame(frame.data, frame.keyframe, frame.width, frame.height).catch(() => {
+            onDecodeError("The decoder of the phone refused the picture.");
         });
-    }, [frame, h264, onH264Failed]);
+    }, [frame, h264, onDecodeError]);
 
     if (h264 && decoderAvailable()) {
-        return <KvmVideoView ref={video} style={styles.picture} onDecodeError={() => onH264Failed()} />;
-    }
-    if (frame.codec === JPEG_WIRE) {
         return (
-            <Image
+            <KvmVideoView
+                ref={video}
                 style={styles.picture}
-                source={{ uri: `data:image/jpeg;base64,${toBase64(frame.data)}` }}
-                resizeMode="contain"
+                onDecodeError={() => onDecodeError("The decoder of the phone refused the picture.")}
             />
         );
     }
@@ -363,14 +356,6 @@ function streamCodec(wireValue: number): string {
 
 function stateTitle(state: string): string {
     return state === "connected" ? "Waiting for the first frame" : "Connecting";
-}
-
-function toBase64(bytes: Uint8Array): string {
-    let binary = "";
-    for (const byte of bytes) {
-        binary += String.fromCharCode(byte);
-    }
-    return globalThis.btoa(binary);
 }
 
 const styles = StyleSheet.create({

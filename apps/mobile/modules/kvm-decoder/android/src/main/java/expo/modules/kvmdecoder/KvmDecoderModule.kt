@@ -5,7 +5,6 @@ import android.graphics.SurfaceTexture
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.os.Build
-import android.util.Base64
 import android.view.Surface
 import android.view.TextureView
 import expo.modules.kotlin.AppContext
@@ -25,7 +24,7 @@ class KvmDecoderModule : Module() {
 
         View(KvmVideoView::class) {
             Events("onDecodeError")
-            AsyncFunction("pushFrame") { view: KvmVideoView, payload: String, keyframe: Boolean, width: Int, height: Int ->
+            AsyncFunction("pushFrame") { view: KvmVideoView, payload: ByteArray, keyframe: Boolean, width: Int, height: Int ->
                 view.pushFrame(payload, keyframe, width, height)
             }
         }
@@ -55,16 +54,10 @@ class KvmVideoView(context: Context, appContext: AppContext) :
         texture.surfaceTextureListener = this
     }
 
-    fun pushFrame(payload: String, keyframe: Boolean, width: Int, height: Int) {
-        val bytes = try {
-            Base64.decode(payload, Base64.DEFAULT)
-        } catch (_: IllegalArgumentException) {
-            report("the frame was not valid base64")
-            return
-        }
+    fun pushFrame(payload: ByteArray, keyframe: Boolean, width: Int, height: Int) {
         synchronized(lock) {
             if (keyframe) {
-                heldKeyframe = bytes
+                heldKeyframe = payload
                 heldWidth = width
                 heldHeight = height
             }
@@ -72,7 +65,7 @@ class KvmVideoView(context: Context, appContext: AppContext) :
             if (current == null || !current.isValid) {
                 return
             }
-            show(current, bytes, keyframe, width, height)
+            show(current, payload, keyframe, width, height)
         }
     }
 

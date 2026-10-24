@@ -13,11 +13,10 @@ import type { DisplayInfo } from "@kvm/protocol";
 import { ReconnectingClient, type ConnectionState } from "./client";
 import type { Frame } from "./frames";
 import type { StoredPairing } from "./pairing";
-import { codecMask, type AppSettings } from "./settings";
+import { codecMask } from "./settings";
 
 interface UseSessionOptions {
     pairing: StoredPairing | null;
-    settings: AppSettings;
     /** The session stays down until the user opens a desktop from the home cards. */
     active: boolean;
     /** Changes each time the user opens a desktop, so the last error is not shown again. */
@@ -27,7 +26,7 @@ interface UseSessionOptions {
     onDisplayInfo?: (info: DisplayInfo) => void;
 }
 
-export function useSession({ pairing, settings, active, openId, reloadToken, onDisplayInfo }: UseSessionOptions) {
+export function useSession({ pairing, active, openId, reloadToken, onDisplayInfo }: UseSessionOptions) {
     const [state, setState] = useState<ConnectionState>("idle");
     const [detail, setDetail] = useState<string | null>(null);
     const [info, setInfo] = useState<DisplayInfo | null>(null);
@@ -44,20 +43,17 @@ export function useSession({ pairing, settings, active, openId, reloadToken, onD
     }
 
     const clientRef = useRef<ReconnectingClient | null>(null);
-    const settingsRef = useRef(settings);
     const onDisplayInfoRef = useRef(onDisplayInfo);
     const [client, setClient] = useState<ReconnectingClient | null>(null);
 
     useEffect(() => {
-        settingsRef.current = settings;
         onDisplayInfoRef.current = onDisplayInfo;
-    }, [settings, onDisplayInfo]);
+    }, [onDisplayInfo]);
 
     const connect = useCallback(() => {
         if (!pairing) {
             return;
         }
-        const current = settingsRef.current;
         const client = new ReconnectingClient(
             {
                 host: pairing.host,
@@ -65,7 +61,7 @@ export function useSession({ pairing, settings, active, openId, reloadToken, onD
                 psk: pairing.psk,
                 deviceId: pairing.deviceIdBytes,
                 deviceName: deviceName(),
-                codecMask: codecMask(current.codecPreference),
+                codecMask: codecMask(),
                 caps: 0b11,
                 maxWidth: capability().width,
                 maxHeight: capability().height,

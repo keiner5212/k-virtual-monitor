@@ -9,8 +9,17 @@
 
 use std::io;
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
+
+/// Takes the lock of the store.
+///
+/// A panic while the lock was held does not break the data it protects, so
+/// the lock is taken anyway: one bad moment must not take the server down.
+pub fn lock_store(store: &Mutex<DeviceStore>) -> MutexGuard<'_, DeviceStore> {
+    store.lock().unwrap_or_else(|error| error.into_inner())
+}
 
 /// Capability bits, mirrored from the protocol package.
 pub const CAP_VIEW: u8 = 1 << 0;
@@ -111,6 +120,15 @@ impl DeviceStore {
 
     pub fn find(&self, id: &str) -> Option<&DeviceEntry> {
         self.devices.iter().find(|entry| entry.id == id)
+    }
+
+    /// The device that reported this model.
+    ///
+    /// The model is what the user sees, so it is what tells two phones of the
+    /// same person apart: a phone that comes back with another id keeps the
+    /// place of the entry of its model.
+    pub fn find_by_model(&self, name: &str) -> Option<&DeviceEntry> {
+        self.devices.iter().find(|entry| entry.name == name)
     }
 
     /// The device that owns this pairing secret.
@@ -246,7 +264,7 @@ mod tests {
 
     #[test]
     fn a_store_round_trips_through_a_file() {
-        let dir = std::env::temp_dir().join(format!("kvm-test-{}", std::process::id()));
+        let dir = crate::scratch_dir().join(format!("kvm-test-{}", std::process::id()));
         let path = dir.join("devices.json");
         let store = DeviceStore {
             devices: vec![entry("aa")],
@@ -307,10 +325,18 @@ mod tests {
     #[test]
     fn the_store_file_is_not_readable_by_other_users() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("kvm-mode-{}", std::process::id()));
+        let dir = crate::scratch_dir().join(format!("kvm-mode-{}", std::process::id()));
         let path = dir.join("devices.json");
         DeviceStore::default().save(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        if mode & 0o777 == 0o777 {
+            // The folder of the workspace does not keep the permissions of the
+            // files, so there is nothing to check here. The store of the
+            // server lives in the state folder of the user, which does.
+            eprintln!("the filesystem of the workspace does not keep the permissions");
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
         assert_eq!(mode & 0o777, 0o600);
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -72,13 +72,25 @@ From those numbers:
 | --- | --- | --- |
 | Window | 8 frames, 2 MB | 30 fps at 70 ms needs 7 frames in flight |
 | Acknowledgement | on receipt | the decoder must not throttle the sender |
-| Codec | H.264 first, JPEG as fallback | 5 to 20 times less bandwidth, hardware decode on the phone |
+| Codec | H.264, always | 5 to 20 times less bandwidth, hardware decode on the phone |
 | Degradation order | fps, then quality, then resolution | text legibility is worth more than motion |
 | Default | 1408x792, 20 fps, quality 70 | 35 Mbps, inside the usable band of a home WiFi |
 
 The phone is the real limit at high resolutions: a software JPEG decode of
 1920x1200 takes about 45 ms, so 22 frames per second is the ceiling at that
 size. With a hardware decoder the limit moves to the network.
+
+## The rate of the pictures
+
+The compositor only paints the screen when something on it changes, so the
+capture is at the rate of the changes and not at a fixed rate. The measured
+delay between a change on the screen and the picture that is sent is about ten
+milliseconds.
+
+The encoder gets the last picture again when the screen does not change, so
+the stream keeps the rate it was asked for. The pictures that repeat cost
+almost nothing in H.264, so the phone always has a picture and the link is
+quiet when the screen is quiet.
 
 ## Milestones
 
@@ -88,14 +100,11 @@ size. With a hardware decoder the limit moves to the network.
 4. Phone app: pairing by QR code, session, frame display, settings. Done.
 5. Desktop server: XDG portal capture. Done. Input injection is next.
 6. Phone: touch, mouse and keyboard input.
-7. Codecs: H.264 with hardware encode and decode, JPEG as the fallback.
+7. Codecs: H.264 with hardware encode and decode. Done.
 8. Packaging: the desktop bundle and the APK.
 
 ## Known gaps
 
-- The client renders frames as base64 data URIs. That copies every frame
-  twice and will not hold 30 fps. The next step is a native view that takes
-  the bytes without the round trip through the bridge.
 - The input messages are parsed and the capability is enforced, but the
   events are not injected into the desktop yet.
 - There is no discovery. The address comes from the pairing code.

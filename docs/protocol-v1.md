@@ -120,9 +120,10 @@ offset size field
 13     1    codec
 ```
 
-The picture is encoded in the codec of the stream. The JPEG codec is a plain
-JPEG file. The H.264 codec is a sequence of length prefixed access units,
-each one a NAL unit without its start code.
+The picture is encoded in the codec of the stream. Every picture of the stream
+is compressed with H.264, which is a sequence of access units in the Annex B
+format: each one starts with the start code `00 00 00 01` and carries the
+NAL units of the picture.
 
 The codec is one byte, and the same numbering is used in the DISPLAY_INFO
 message and in the frame header:
@@ -131,9 +132,12 @@ message and in the frame header:
 0 none   1 JPEG   2 H.264   3 H.265   4 VP9   5 AV1
 ```
 
+The value 1 is kept for the old builds, but the server never sends it: the
+stream is always H.264.
+
 The client sends the codecs it can decode as a bit mask in the HELLO, and the
 server answers with the codec it will use. Both sides run the same order of
-preference, the most compressed first: AV1, H.265, H.264, VP9, JPEG.
+preference, the most compressed first: AV1, H.265, H.264, VP9.
 
 The client acknowledges frames on receipt, before decoding, so a slow decoder
 never blocks the server.

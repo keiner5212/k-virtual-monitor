@@ -28,7 +28,7 @@ struct Fixture {
 }
 
 async fn start() -> Fixture {
-    let dir = std::env::temp_dir().join(format!("kvm-session-{}", std::process::id()));
+    let dir = kvm_desktop_lib::scratch_dir().join(format!("kvm-session-{}", std::process::id()));
     let store_path = dir.join("devices.json");
 
     let psk = Psk::generate();
@@ -89,7 +89,7 @@ fn hello(device_id: [u8; 16]) -> Hello {
         max_width: 320,
         max_height: 240,
         max_fps: 20,
-        codec_mask: codec::JPEG,
+        codec_mask: codec::H264,
         caps_requested: CAP_VIEW,
     }
 }
@@ -122,9 +122,9 @@ async fn a_paired_client_completes_the_handshake_and_receives_frames() {
     assert!(plaintext.len() > 100);
     let header_len = kvm_protocol::messages::FrameHeader::LEN;
     assert_eq!(
-        &plaintext[header_len..header_len + 2],
-        &[0xff, 0xd8],
-        "the frame carries a JPEG"
+        &plaintext[header_len..header_len + 4],
+        &[0x00, 0x00, 0x00, 0x01],
+        "the frame carries an H.264 access unit"
     );
 
     std::fs::remove_dir_all(&fixture.dir).ok();
@@ -353,7 +353,7 @@ async fn a_view_only_device_cannot_send_input() {
 /// it is the same phone and does not pile up entries.
 #[tokio::test]
 async fn a_phone_that_pairs_again_keeps_one_entry() {
-    let dir = std::env::temp_dir().join(format!("kvm-pair-{}", std::process::id()));
+    let dir = kvm_desktop_lib::scratch_dir().join(format!("kvm-pair-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("the directory exists");
     let store_path = dir.join("devices.json");
 

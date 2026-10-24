@@ -9,11 +9,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import { Codec } from "@kvm/protocol";
 
-export type CodecPreference = "auto" | "h264" | "h265" | "jpeg";
-
 export interface AppSettings {
-    /** Which compression the phone asks the server for. */
-    codecPreference: CodecPreference;
     /** Keep the screen on while the session is live. */
     keepAwake: boolean;
     /** Show the frame rate and the codec in the viewer. */
@@ -21,7 +17,6 @@ export interface AppSettings {
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
-    codecPreference: "auto",
     keepAwake: true,
     showStats: true,
 };
@@ -47,7 +42,6 @@ export async function loadSettings(deviceId: string | null): Promise<AppSettings
         }
         const parsed = JSON.parse(raw) as Partial<AppSettings>;
         return {
-            codecPreference: parsed.codecPreference ?? DEFAULT_SETTINGS.codecPreference,
             keepAwake: parsed.keepAwake ?? DEFAULT_SETTINGS.keepAwake,
             showStats: parsed.showStats ?? DEFAULT_SETTINGS.showStats,
         };
@@ -60,39 +54,13 @@ export async function saveSettings(deviceId: string, settings: AppSettings): Pro
     await AsyncStorage.setItem(storageKey(deviceId), JSON.stringify(settings));
 }
 
-/** False when this build has no H.264 decoder. JPEG is still compressed. */
-let hardwareDecoder = true;
-
-export function setHardwareDecoder(ready: boolean): void {
-    hardwareDecoder = ready;
-}
-
 /**
  * The codecs the phone asks for.
  *
- * H.264 is preferred. JPEG is always included, so a tablet that cannot decode
- * H.264, or a desktop without the encoder, still gets a compressed stream.
+ * Every picture of the stream is compressed with H.264. There is no other
+ * choice: a picture that travels alone costs far more than the link can
+ * carry, and the phone cannot draw it as fast as it arrives.
  */
-export function codecMask(preference: CodecPreference): number {
-    if (!hardwareDecoder) {
-        return Codec.JPEG;
-    }
-    switch (preference) {
-        case "h264":
-            return Codec.H264 | Codec.JPEG;
-        case "h265":
-            return Codec.H265 | Codec.H264 | Codec.JPEG;
-        case "jpeg":
-            return Codec.JPEG;
-        case "auto":
-        default:
-            return Codec.H264 | Codec.H265 | Codec.JPEG;
-    }
+export function codecMask(): number {
+    return Codec.H264;
 }
-
-export const CODEC_PREFERENCES: Array<{ value: CodecPreference; label: string; hint: string }> = [
-    { value: "auto", label: "Automatic", hint: "The most compressed codec both ends support" },
-    { value: "h264", label: "H.264", hint: "Hardware decoded, works on almost every phone" },
-    { value: "h265", label: "H.265", hint: "Less bandwidth, newer phones only" },
-    { value: "jpeg", label: "JPEG", hint: "Every frame on its own, the most bandwidth" },
-];

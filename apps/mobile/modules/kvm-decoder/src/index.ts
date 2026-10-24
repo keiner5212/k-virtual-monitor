@@ -7,7 +7,7 @@ type NativeDecoder = {
 };
 
 export type KvmVideoRef = {
-    pushFrame: (payload: string, keyframe: boolean, width: number, height: number) => Promise<void>;
+    pushFrame: (payload: Uint8Array, keyframe: boolean, width: number, height: number) => Promise<void>;
 };
 
 type VideoProps = {

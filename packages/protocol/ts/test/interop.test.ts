@@ -8,9 +8,8 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -18,6 +17,8 @@ import { describe, expect, it } from "vitest";
 
 import {
     clientHandshake,
+    codecWireValue,
+    Codec,
     decodeDisplayInfo,
     decodeFrameHeader,
     encodeFrameAck,
@@ -29,8 +30,17 @@ import {
     type Message,
 } from "../src/index.js";
 
-const binary = fileURLToPath(new URL("../../../../target/debug/kvm-desktop", import.meta.url));
+const binary = fileURLToPath(
+    new URL("../../../../.tmp/target/debug/kvm-desktop", import.meta.url),
+);
 const itWithServer = existsSync(binary) ? it : it.skip;
+
+/** The folder of the workspace where the temporary files are written. */
+function scratchDir(): string {
+    const directory = fileURLToPath(new URL("../../../../.tmp/", import.meta.url));
+    mkdirSync(directory, { recursive: true });
+    return directory;
+}
 
 function freePort(): Promise<number> {
     return new Promise((resolve, reject) => {
@@ -69,12 +79,15 @@ function connect(port: number): Promise<ChannelSocket> {
 
 describe("the Rust server and the TypeScript client", () => {
     itWithServer("complete the handshake and exchange frames", async () => {
-        const directory = mkdtempSync(join(tmpdir(), "kvm-interop-"));
+        const directory = mkdtempSync(join(scratchDir(), "kvm-interop-"));
         const port = await freePort();
         const environment = {
             ...process.env,
             KVM_STORE_PATH: join(directory, "devices.json"),
             KVM_CONFIG_PATH: join(directory, "config.toml"),
+            // The test pattern of the server, not the screen of the desktop:
+            // the check has to be the same everywhere.
+            KVM_SYNTHETIC: "1",
         };
         writeFileSync(
             environment.KVM_CONFIG_PATH,
@@ -108,9 +121,12 @@ describe("the Rust server and the TypeScript client", () => {
                 const plaintext = session.open(message.header, message.payload);
                 const header = decodeFrameHeader(plaintext.subarray(0, FRAME_HEADER_LEN));
                 expect(header.width).toBe(320);
-                // The picture of the synthetic source is a JPEG.
-                expect(plaintext[FRAME_HEADER_LEN]).toBe(0xff);
-                expect(plaintext[FRAME_HEADER_LEN + 1]).toBe(0xd8);
+                // The picture of the synthetic source is an H.264 access unit.
+                expect(header.codec).toBe(codecWireValue(Codec.H264));
+                expect(plaintext[FRAME_HEADER_LEN]).toBe(0x00);
+                expect(plaintext[FRAME_HEADER_LEN + 1]).toBe(0x00);
+                expect(plaintext[FRAME_HEADER_LEN + 2]).toBe(0x00);
+                expect(plaintext[FRAME_HEADER_LEN + 3]).toBe(0x01);
                 frames += 1;
                 acked = message.header.seq;
                 const ack = encodeFrameAck({
@@ -131,12 +147,13 @@ describe("the Rust server and the TypeScript client", () => {
     });
 
     itWithServer("accept a pairing code created while the server runs", async () => {
-        const directory = mkdtempSync(join(tmpdir(), "kvm-interop-"));
+        const directory = mkdtempSync(join(scratchDir(), "kvm-interop-"));
         const port = await freePort();
         const environment = {
             ...process.env,
             KVM_STORE_PATH: join(directory, "devices.json"),
             KVM_CONFIG_PATH: join(directory, "config.toml"),
+            KVM_SYNTHETIC: "1",
         };
         writeFileSync(
             environment.KVM_CONFIG_PATH,
@@ -203,7 +220,7 @@ function helloOf(blob: string) {
         maxWidth: 320,
         maxHeight: 240,
         maxFps: 20,
-        codecMask: 1,
+        codecMask: codecWireValue(Codec.H264),
         capsRequested: 3,
     };
 }

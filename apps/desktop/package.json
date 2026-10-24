@@ -1,7 +1,7 @@
 {
     "name": "@kvm/desktop",
     "private": true,
-    "version": "0.1.0",
+    "version": "0.1.1",
     "type": "module",
     "description": "k-virtual-monitor desktop server",
     "scripts": {

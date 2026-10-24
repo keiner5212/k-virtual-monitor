@@ -33,6 +33,9 @@ function isScanCancelled(cause: unknown): boolean {
     return cause instanceof Error && cause.message.toLowerCase().includes("cancelled");
 }
 
+/** How long the camera gets before the app says it is not reading anything. */
+const SCAN_TIMEOUT_MS = 12000;
+
 export default function PairScreen({ onPair, onBack, error }: PairScreenProps) {
     const [permission, requestPermission] = useCameraPermissions();
     const [manual, setManual] = useState("");
@@ -86,6 +89,18 @@ export default function PairScreen({ onPair, onBack, error }: PairScreenProps) {
         });
         return () => subscription.remove();
     }, [stage]);
+
+    useEffect(() => {
+        if (!cameraOn) {
+            return;
+        }
+        // A camera that cannot read codes would leave the user in front of a
+        // preview that does nothing. Say so, and let them type the code.
+        const timer = setTimeout(() => {
+            setLocalError("The camera did not read the code. Close it and type the code instead.");
+        }, SCAN_TIMEOUT_MS);
+        return () => clearTimeout(timer);
+    }, [cameraOn]);
 
     const scan = async () => {
         const current = permission?.granted ? permission : await requestPermission();

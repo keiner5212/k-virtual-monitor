@@ -401,7 +401,24 @@ pub fn run_headless() -> Result<(), String> {
     let server = Arc::new(Server::new(config, store, store_path, source));
 
     let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
-    runtime.block_on(async move { server.run().await.map_err(|error| error.to_string()) })
+    runtime.block_on(async move {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(|error| error.to_string())?;
+        let mut interrupt =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .map_err(|error| error.to_string())?;
+        let running = server.clone();
+        let result = tokio::select! {
+            result = running.run() => result.map_err(|error| error.to_string()),
+            _ = terminate.recv() => Ok(()),
+            _ = interrupt.recv() => Ok(()),
+        };
+        // A signal ends the server the same way the window closes the app:
+        // the virtual screen and the encoder go away with it.
+        server.stop_capture();
+        result
+    })
 }
 
 /// The address other devices on the network can reach.

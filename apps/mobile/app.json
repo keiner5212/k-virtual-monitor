@@ -9,7 +9,6 @@
     "backgroundColor": "#101014",
     "android": {
       "package": "dev.kvm.app",
-      "enableProguardInReleaseBuilds": false,
       "permissions": [
         "CAMERA",
         "INTERNET",
@@ -33,6 +32,14 @@
         "expo-camera",
         {
           "cameraPermission": "The camera is used to scan the pairing code of the desktop."
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "enableProguardInReleaseBuilds": false
+          }
         }
       ],
       [

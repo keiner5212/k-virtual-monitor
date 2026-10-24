@@ -10,20 +10,15 @@ section. The release draft uses that section as its body.
 
 - The pictures arrive. The capture threw every frame away: the portal hands them over in dma-bufs, whose size is not where the code looked for it.
 - The picture of a screen that does not change is repeated, so the phone has a picture instead of waiting for one that never comes.
-- The desktop adds a new virtual monitor. It no longer shares the existing screen.
-- The desktop leaves the screen of the user alone. The new virtual screen is found by name, so the resolution of the main display is never changed.
-- The desktop asks for the screen permission once. The permission is kept, so the dialog only appears the first time.
 - The size the desktop picks for a phone is the size the phone gets. Before, the phone asked for a size and the desktop ignored its own setting.
 - The phone is one entry on the desktop. The phone owns its id now, so pairing again does not leave a second copy of the same phone behind.
 - The phone pairs again once after this update, because the id it had was made by the desktop.
 - The picture of a frame is no longer copied for every frame that is sent.
 - The display is only reconfigured when the size really changes.
-- Pairing opens the phone camera. The code scanner no longer fails to open.
-- The phone scanner reads the code. The camera patch is part of the app now, and the reader is attached whatever order the camera receives its settings in.
 - The phone reads the code with the scanner of the system first. The camera in the app is the fallback.
-- The scanner of the system is no longer stripped from the release build.
-- A code the camera cannot read says so, instead of leaving the scanner open with nothing happening.
-- Closing the desktop app ends the portal session, removes the virtual screen and stops the encoder.
+- The scanner of the system is no longer stripped from the release build. The switch that turns the shrinking off was never reaching the build.
+- The phone says when the camera reads nothing, instead of leaving the user in front of a preview that does nothing.
+- Closing the desktop app ends the portal session, removes the virtual screen and stops the encoder. A server that is asked to stop does the same.
 - A frame the capture cannot read no longer takes the whole app down.
 - The desktop says when the virtual screen is waiting for its first picture.
 - The phone sends the model of the device, so the desktop tells the phones apart.
@@ -35,10 +30,24 @@ section. The release draft uses that section as its body.
 
 ### Changed
 
-- The window title bar drags the window again.
 - The resolution and the frame rate are dropdowns on both sides, and they come from one list.
 - The desktop owns the size of the stream. The phone shows the size in effect instead of picking one of its own.
 - The phone has no retry settings any more. The phone comes back on its own.
+
+## [0.1.3] - 2026-10-23
+
+### Fixed
+
+- The desktop adds a new virtual monitor. It no longer shares the existing screen.
+- The desktop leaves the screen of the user alone. The new virtual screen is found by name, so the resolution of the main display is never changed.
+- The desktop asks for the screen permission once. The permission is kept, so the dialog only appears the first time.
+- Pairing opens the phone camera. The code scanner no longer fails to open.
+- The phone scanner reads the code. The camera patch is part of the app now, and the reader is attached whatever order the camera receives its settings in.
+- A code the camera cannot read says so, instead of leaving the scanner open with nothing happening.
+
+### Changed
+
+- The window title bar drags the window again.
 
 ## [0.1.2] - 2026-10-23
 

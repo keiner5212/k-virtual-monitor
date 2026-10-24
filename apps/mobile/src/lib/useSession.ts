@@ -19,9 +19,10 @@ interface UseSessionOptions {
     settings: AppSettings;
     /** Bumped when the user changes the stream, so the phone reconnects with the new selection. */
     reloadToken: number;
+    onDisplayInfo?: (info: DisplayInfo) => void;
 }
 
-export function useSession({ pairing, settings, reloadToken }: UseSessionOptions) {
+export function useSession({ pairing, settings, reloadToken, onDisplayInfo }: UseSessionOptions) {
     const [state, setState] = useState<ConnectionState>("idle");
     const [detail, setDetail] = useState<string | null>(null);
     const [info, setInfo] = useState<DisplayInfo | null>(null);
@@ -30,11 +31,13 @@ export function useSession({ pairing, settings, reloadToken }: UseSessionOptions
 
     const clientRef = useRef<ReconnectingClient | null>(null);
     const settingsRef = useRef(settings);
+    const onDisplayInfoRef = useRef(onDisplayInfo);
     const [client, setClient] = useState<ReconnectingClient | null>(null);
 
     useEffect(() => {
         settingsRef.current = settings;
-    }, [settings]);
+        onDisplayInfoRef.current = onDisplayInfo;
+    }, [settings, onDisplayInfo]);
 
     const connect = useCallback(() => {
         if (!pairing) {
@@ -58,7 +61,10 @@ export function useSession({ pairing, settings, reloadToken }: UseSessionOptions
                     setState(next);
                     setDetail(message ?? null);
                 },
-                onDisplayInfo: (displayInfo) => setInfo(displayInfo),
+                onDisplayInfo: (displayInfo) => {
+                    setInfo(displayInfo);
+                    onDisplayInfoRef.current?.(displayInfo);
+                },
                 onReconnectIn: (seconds) => setReconnectingIn(seconds),
             },
             { delayMs: current.reconnectDelayMs, maxDelayMs: current.reconnectMaxDelayMs },

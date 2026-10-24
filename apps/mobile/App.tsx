@@ -4,7 +4,7 @@ import { BackHandler, Image, Pressable, ScrollView, StyleSheet, Text, View } fro
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 
-import { Codec, codecFromWire, codecName, codecWireValue } from "@kvm/protocol";
+import { Codec, codecFromWire, codecName, codecWireValue, type DisplayInfo } from "@kvm/protocol";
 import { decoderAvailable, KvmVideoView, type KvmVideoRef } from "kvm-decoder";
 
 import { clearPairing, loadPairing, savePairing, type StoredPairing } from "./src/lib/pairing";
@@ -50,7 +50,26 @@ function Monitor() {
         })();
     }, []);
 
-    const session = useSession({ pairing, settings, reloadToken });
+    const applyDisplay = useCallback((info: DisplayInfo) => {
+        if (!pairing) {
+            return;
+        }
+        setSettings((prev) => {
+            if (prev.maxWidth === info.width && prev.maxHeight === info.height && prev.maxFps === info.fps) {
+                return prev;
+            }
+            const next = {
+                ...prev,
+                maxWidth: info.width,
+                maxHeight: info.height,
+                maxFps: info.fps,
+            };
+            void saveSettings(pairing.deviceId, next);
+            return next;
+        });
+    }, [pairing]);
+
+    const session = useSession({ pairing, settings, reloadToken, onDisplayInfo: applyDisplay });
 
     useEffect(() => {
         if (session.state !== "connected" || !settings.keepAwake) {
@@ -81,26 +100,6 @@ function Monitor() {
     }, [pairing]);
 
     useEffect(() => {
-        if (!session.info || !pairing) {
-            return;
-        }
-        const info = session.info;
-        setSettings((prev) => {
-            if (prev.maxWidth === info.width && prev.maxHeight === info.height && prev.maxFps === info.fps) {
-                return prev;
-            }
-            const next = {
-                ...prev,
-                maxWidth: info.width,
-                maxHeight: info.height,
-                maxFps: info.fps,
-            };
-            void saveSettings(pairing.deviceId, next);
-            return next;
-        });
-    }, [session.info, pairing]);
-
-    useEffect(() => {
         if (!fullscreen) {
             return;
         }
@@ -122,16 +121,13 @@ function Monitor() {
     }, []);
 
     const h264Fallback = useRef(false);
-    const settingsRef = useRef(settings);
-    settingsRef.current = settings;
     const failH264 = useCallback(() => {
-        const prev = settingsRef.current;
-        if (h264Fallback.current || prev.codecPreference === "jpeg") {
+        if (h264Fallback.current || settings.codecPreference === "jpeg") {
             return;
         }
         h264Fallback.current = true;
-        updateSettings({ ...prev, codecPreference: "jpeg" });
-    }, [updateSettings]);
+        updateSettings({ ...settings, codecPreference: "jpeg" });
+    }, [settings, updateSettings]);
 
     useEffect(() => {
         if (settings.codecPreference === "h264" || settings.codecPreference === "auto") {

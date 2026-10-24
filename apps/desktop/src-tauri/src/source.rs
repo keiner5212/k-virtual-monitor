@@ -99,7 +99,11 @@ impl FrameSource for SyntheticSource {
     fn set_mode(&self, mode: StreamMode) {
         let incoming = mode.normalize();
         let mut slot = self.mode.lock().expect("stream mode is not poisoned");
-        let codec = if incoming.codec == 0 { slot.codec } else { incoming.codec };
+        let codec = if incoming.codec == 0 {
+            slot.codec
+        } else {
+            incoming.codec
+        };
         *slot = StreamMode { codec, ..incoming };
     }
 

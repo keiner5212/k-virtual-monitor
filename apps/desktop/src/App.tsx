@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import QRCode from "react-qr-code";
 
 import CountUp from "./components/react-bits/CountUp";
@@ -64,9 +64,13 @@ export default function App() {
     const [now, setNow] = useState(() => Date.now());
     const [error, setError] = useState<string | null>(null);
     const [saveState, setSaveState] = useState<SaveState>("idle");
-    const [selectedId, setSelectedId] = useState<string | null>(null);
-    const [deviceDraft, setDeviceDraft] = useState<DeviceInfo | null>(null);
-    const deviceDirty = useRef(false);
+    const [pickedId, setPickedId] = useState<string | null>(null);
+    const [editedDevice, setEditedDevice] = useState<DeviceInfo | null>(null);
+    const selectedId = devices.some((device) => device.id === pickedId)
+        ? pickedId
+        : (devices[0]?.id ?? null);
+    const selectedDevice = devices.find((device) => device.id === selectedId) ?? null;
+    const deviceDraft = editedDevice?.id === selectedId ? editedDevice : selectedDevice;
 
     const refresh = useCallback(async () => {
         try {
@@ -170,23 +174,6 @@ export default function App() {
         }
     }, [draft]);
 
-    useEffect(() => {
-        deviceDirty.current = false;
-    }, [selectedId]);
-
-    useEffect(() => {
-        if (deviceDirty.current) {
-            return;
-        }
-        setDeviceDraft(devices.find((device) => device.id === selectedId) ?? null);
-    }, [devices, selectedId]);
-
-    useEffect(() => {
-        if (!selectedId && devices[0]) {
-            setSelectedId(devices[0].id);
-        }
-    }, [devices, selectedId]);
-
     const saveDevice = useCallback(async () => {
         if (!deviceDraft) {
             return;
@@ -200,7 +187,7 @@ export default function App() {
                 fps: deviceDraft.fps,
                 jpegQuality: deviceDraft.jpegQuality,
             });
-            deviceDirty.current = false;
+            setEditedDevice(null);
             await refresh();
         } catch (cause) {
             setError(cause instanceof Error ? cause.message : String(cause));
@@ -410,7 +397,10 @@ export default function App() {
                                         <button
                                             type="button"
                                             className="font-mono text-sm text-ink"
-                                            onClick={() => setSelectedId(device.id)}
+                                            onClick={() => {
+                                                setPickedId(device.id);
+                                                setEditedDevice(null);
+                                            }}
                                         >
                                             {device.name}
                                             {device.connected ? " · live" : ""}
@@ -436,8 +426,7 @@ export default function App() {
                                                         className={inputClass}
                                                         value={deviceDraft.width}
                                                         onChange={(event) => {
-                                                            deviceDirty.current = true;
-                                                            setDeviceDraft({
+                                                            setEditedDevice({
                                                                 ...deviceDraft,
                                                                 width: Number(event.target.value) || 0,
                                                             });
@@ -452,8 +441,7 @@ export default function App() {
                                                         className={inputClass}
                                                         value={deviceDraft.height}
                                                         onChange={(event) => {
-                                                            deviceDirty.current = true;
-                                                            setDeviceDraft({
+                                                            setEditedDevice({
                                                                 ...deviceDraft,
                                                                 height: Number(event.target.value) || 0,
                                                             });
@@ -473,8 +461,7 @@ export default function App() {
                                                     className={inputClass}
                                                     value={deviceDraft.fps}
                                                     onChange={(event) => {
-                                                        deviceDirty.current = true;
-                                                        setDeviceDraft({
+                                                        setEditedDevice({
                                                             ...deviceDraft,
                                                             fps: Number(event.target.value) || 0,
                                                         });
@@ -494,8 +481,7 @@ export default function App() {
                                                         className="h-9 w-full accent-[var(--color-accent)]"
                                                         value={deviceDraft.jpegQuality}
                                                         onChange={(event) => {
-                                                            deviceDirty.current = true;
-                                                            setDeviceDraft({
+                                                            setEditedDevice({
                                                                 ...deviceDraft,
                                                                 jpegQuality: Number(event.target.value),
                                                             });

@@ -156,13 +156,19 @@ impl H264Session {
         if rgb.len() != expected {
             return Err("frame size does not match the h264 encoder".to_string());
         }
-        self.stdin.write_all(rgb).map_err(|error| error.to_string())?;
+        self.stdin
+            .write_all(rgb)
+            .map_err(|error| error.to_string())?;
         self.stdin.flush().map_err(|error| error.to_string())?;
         let deadline = Instant::now() + Duration::from_millis(150);
         let mut last_len = 0usize;
         let mut changed_at: Option<Instant> = None;
         loop {
-            let mut bytes = self.buffer.bytes.lock().expect("h264 buffer is not poisoned");
+            let mut bytes = self
+                .buffer
+                .bytes
+                .lock()
+                .expect("h264 buffer is not poisoned");
             if bytes.len() != last_len {
                 last_len = bytes.len();
                 changed_at = Some(Instant::now());
@@ -263,6 +269,34 @@ fn nal_types(bytes: &[u8]) -> Vec<u8> {
     nal_spans(bytes).into_iter().map(|(_, kind)| kind).collect()
 }
 
+fn nal_spans(bytes: &[u8]) -> Vec<(usize, u8)> {
+    let mut spans = Vec::new();
+    let mut index = 0;
+    while index + 3 < bytes.len() {
+        let three_byte = bytes[index] == 0 && bytes[index + 1] == 0 && bytes[index + 2] == 1;
+        let four_byte = index + 4 < bytes.len()
+            && bytes[index] == 0
+            && bytes[index + 1] == 0
+            && bytes[index + 2] == 0
+            && bytes[index + 3] == 1;
+        if !three_byte && !four_byte {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let header = if bytes[start + 2] == 1 {
+            start + 3
+        } else {
+            start + 4
+        };
+        if header < bytes.len() {
+            spans.push((start, bytes[header] & 0x1f));
+        }
+        index = header.saturating_add(1);
+    }
+    spans
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,33 +313,4 @@ mod tests {
         assert!(unit.bytes.len() > 20);
         assert!(unit.bytes.len() < rgb.len());
     }
-}
-
-fn nal_spans(bytes: &[u8]) -> Vec<(usize, u8)> {
-    let mut spans = Vec::new();
-    let mut index = 0;
-    while index + 3 < bytes.len() {
-        let start = if bytes[index] == 0 && bytes[index + 1] == 0 && bytes[index + 2] == 1 {
-            Some(index)
-        } else if index + 4 < bytes.len()
-            && bytes[index] == 0
-            && bytes[index + 1] == 0
-            && bytes[index + 2] == 0
-            && bytes[index + 3] == 1
-        {
-            Some(index)
-        } else {
-            None
-        };
-        let Some(start) = start else {
-            index += 1;
-            continue;
-        };
-        let header = if bytes[start + 2] == 1 { start + 3 } else { start + 4 };
-        if header < bytes.len() {
-            spans.push((start, bytes[header] & 0x1f));
-        }
-        index = header.saturating_add(1);
-    }
-    spans
 }

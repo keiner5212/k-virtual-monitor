@@ -5,8 +5,8 @@
 //! node. The development headers are not installed, so the library is loaded
 //! by name and the structs below follow the PipeWire 1.0-1.6 ABI.
 
-use std::collections::HashMap;
 use rand::RngCore;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::fd::IntoRawFd;
 use std::process::Command;
@@ -130,7 +130,11 @@ impl FrameSource for VirtualSource {
     fn set_mode(&self, mode: StreamMode) {
         let incoming = mode.normalize();
         let mut slot = self.inner.mode.lock().expect("stream mode is not poisoned");
-        let codec_bit = if incoming.codec == 0 { slot.codec } else { incoming.codec };
+        let codec_bit = if incoming.codec == 0 {
+            slot.codec
+        } else {
+            incoming.codec
+        };
         let mode = StreamMode {
             codec: codec_bit,
             ..incoming
@@ -139,15 +143,29 @@ impl FrameSource for VirtualSource {
         drop(slot);
         if codec_bit == codec::H264 {
             self.inner.h264_down.store(false, Ordering::Relaxed);
-            *self.inner.h264_retry.lock().expect("h264 retry is not poisoned") = None;
+            *self
+                .inner
+                .h264_retry
+                .lock()
+                .expect("h264 retry is not poisoned") = None;
         }
-        if let Some(output) = self.inner.output.lock().expect("output is not poisoned").clone() {
+        if let Some(output) = self
+            .inner
+            .output
+            .lock()
+            .expect("output is not poisoned")
+            .clone()
+        {
             resize_output(&output, mode);
         }
     }
 
     fn status(&self) -> String {
-        self.inner.status.lock().expect("status is not poisoned").clone()
+        self.inner
+            .status
+            .lock()
+            .expect("status is not poisoned")
+            .clone()
     }
 
     fn restart(&self) {
@@ -273,7 +291,10 @@ fn open_virtual_stream(connection: &Connection) -> Result<OpenedStream, String> 
     let fd = screencast
         .open_pipe_wire_remote(&session, HashMap::new())
         .map_err(|error| error.to_string())?;
-    Ok(OpenedStream { fd: fd.into(), node })
+    Ok(OpenedStream {
+        fd: fd.into(),
+        node,
+    })
 }
 
 fn portal_request(
@@ -293,7 +314,9 @@ fn portal_request(
         .map_err(|error| error.to_string())?
         .build()
         .map_err(|error| error.to_string())?;
-    let mut incoming = request.receive_response().map_err(|error| error.to_string())?;
+    let mut incoming = request
+        .receive_response()
+        .map_err(|error| error.to_string())?;
     let _returned = call().map_err(|error| error.to_string())?;
     let message = incoming.next().ok_or("the portal closed the request")?;
     let args = message.args().map_err(|error| error.to_string())?;
@@ -376,7 +399,10 @@ fn wait_for_output(before: &[ScreenOutput]) -> Option<ScreenOutput> {
     let known: std::collections::HashSet<i64> = before.iter().map(|output| output.id).collect();
     for _ in 0..40 {
         let outputs = list_outputs();
-        if let Some(output) = outputs.into_iter().find(|output| !known.contains(&output.id)) {
+        if let Some(output) = outputs
+            .into_iter()
+            .find(|output| !known.contains(&output.id))
+        {
             return Some(output);
         }
         thread::sleep(Duration::from_millis(200));
@@ -393,12 +419,20 @@ fn resize_output(output: &ScreenOutput, mode: StreamMode) {
         ))
         .status();
     let status = Command::new("kscreen-doctor")
-        .arg(format!("output.{id}.mode.{}x{}@60", mode.width, mode.height))
+        .arg(format!(
+            "output.{id}.mode.{}x{}@60",
+            mode.width, mode.height
+        ))
         .arg(format!("output.{id}.scale.1"))
         .arg(format!("output.{id}.enable"))
         .status();
     if status.as_ref().map(|code| !code.success()).unwrap_or(true) {
-        tracing::warn!(id, width = mode.width, height = mode.height, "could not resize the virtual screen");
+        tracing::warn!(
+            id,
+            width = mode.width,
+            height = mode.height,
+            "could not resize the virtual screen"
+        );
     }
 }
 
@@ -476,14 +510,8 @@ struct Pw {
         *const PwStreamEvents,
         *mut std::ffi::c_void,
     ) -> *mut std::ffi::c_void,
-    stream_connect: unsafe extern "C" fn(
-        *mut std::ffi::c_void,
-        i32,
-        u32,
-        u32,
-        *const *const u8,
-        u32,
-    ) -> i32,
+    stream_connect:
+        unsafe extern "C" fn(*mut std::ffi::c_void, i32, u32, u32, *const *const u8, u32) -> i32,
     stream_dequeue_buffer: unsafe extern "C" fn(*mut std::ffi::c_void) -> *mut PwBuffer,
     stream_queue_buffer: unsafe extern "C" fn(*mut std::ffi::c_void, *mut PwBuffer) -> i32,
 }
@@ -671,7 +699,9 @@ fn stream_node(inner: &Arc<Inner>, fd: std::os::fd::OwnedFd, node: u32) -> Resul
     let ptrs = [pod.as_ptr()];
     let connected = unsafe { (pw.stream_connect)(stream, 0, node, 1 | 4, ptrs.as_ptr(), 1) };
     if connected < 0 {
-        return Err(format!("pipewire did not connect to the virtual screen ({connected})"));
+        return Err(format!(
+            "pipewire did not connect to the virtual screen ({connected})"
+        ));
     }
     unsafe { (pw.main_loop_run)(main_loop) };
     Ok(())
@@ -685,9 +715,13 @@ extern "C" fn on_state(data: *mut std::ffi::c_void, _old: i32, state: i32, error
     let text = if error.is_null() {
         "pipewire stopped the stream".to_string()
     } else {
-        unsafe { CStr::from_ptr(error) }.to_string_lossy().into_owned()
+        unsafe { CStr::from_ptr(error) }
+            .to_string_lossy()
+            .into_owned()
     };
-    callback.inner.set_status(format!("Virtual screen was not created: {text}"));
+    callback
+        .inner
+        .set_status(format!("Virtual screen was not created: {text}"));
 }
 
 extern "C" fn on_param(data: *mut std::ffi::c_void, id: u32, param: *const u8) {
@@ -696,7 +730,11 @@ extern "C" fn on_param(data: *mut std::ffi::c_void, id: u32, param: *const u8) {
     }
     let callback = unsafe { &mut *(data as *mut CallbackState) };
     let bytes = unsafe {
-        let size = u32::from_ne_bytes(std::slice::from_raw_parts(param, 4).try_into().unwrap_or([0; 4])) as usize;
+        let size = u32::from_ne_bytes(
+            std::slice::from_raw_parts(param, 4)
+                .try_into()
+                .unwrap_or([0; 4]),
+        ) as usize;
         if size > 1_000_000 {
             return;
         }
@@ -721,7 +759,11 @@ extern "C" fn on_process(data: *mut std::ffi::c_void) {
     let Some((width, height, rgb)) = copied else {
         return;
     };
-    let mode = *callback.inner.mode.lock().expect("stream mode is not poisoned");
+    let mode = *callback
+        .inner
+        .mode
+        .lock()
+        .expect("stream mode is not poisoned");
     let interval = Duration::from_millis(1000 / u64::from(mode.fps.max(1)));
     if callback.last_encode.elapsed() < interval {
         return;
@@ -730,7 +772,14 @@ extern "C" fn on_process(data: *mut std::ffi::c_void) {
     if mode.codec == codec::H264 && !callback.inner.h264_down.load(Ordering::Relaxed) {
         match encode_h264(callback, &rgb, width, height, mode) {
             H264Outcome::Frame(unit) => {
-                publish(callback.inner.as_ref(), width, height, codec::H264, unit.keyframe, unit.bytes);
+                publish(
+                    callback.inner.as_ref(),
+                    width,
+                    height,
+                    codec::H264,
+                    unit.keyframe,
+                    unit.bytes,
+                );
                 return;
             }
             H264Outcome::Wait => return,
@@ -742,7 +791,14 @@ extern "C" fn on_process(data: *mut std::ffi::c_void) {
     let Some(payload) = encode_jpeg(&rgb, width, height, mode.quality) else {
         return;
     };
-    publish(callback.inner.as_ref(), width, height, codec::JPEG, true, payload);
+    publish(
+        callback.inner.as_ref(),
+        width,
+        height,
+        codec::JPEG,
+        true,
+        payload,
+    );
 }
 
 enum H264Outcome {
@@ -751,7 +807,14 @@ enum H264Outcome {
     Failed,
 }
 
-fn publish(inner: &Inner, width: u32, height: u32, codec_bit: u16, keyframe: bool, payload: Vec<u8>) {
+fn publish(
+    inner: &Inner,
+    width: u32,
+    height: u32,
+    codec_bit: u16,
+    keyframe: bool,
+    payload: Vec<u8>,
+) {
     let seq = inner.seq.fetch_add(1, Ordering::Relaxed) + 1;
     let frame = EncodedFrame {
         header: FrameHeader {
@@ -774,13 +837,21 @@ fn encode_h264(
     height: u32,
     mode: StreamMode,
 ) -> H264Outcome {
-    let retry_at = *callback.inner.h264_retry.lock().expect("h264 retry is not poisoned");
+    let retry_at = *callback
+        .inner
+        .h264_retry
+        .lock()
+        .expect("h264 retry is not poisoned");
     if let Some(failed_at) = retry_at {
         if failed_at.elapsed() < Duration::from_secs(1) {
             return H264Outcome::Failed;
         }
     }
-    let mut slot = callback.inner.encoder.lock().expect("h264 encoder is not poisoned");
+    let mut slot = callback
+        .inner
+        .encoder
+        .lock()
+        .expect("h264 encoder is not poisoned");
     let reopen = slot
         .as_ref()
         .map(|session| !session.matches(width, height, mode.fps, mode.quality))
@@ -791,10 +862,14 @@ fn encode_h264(
             Err(error) => {
                 *slot = None;
                 drop(slot);
-                *callback.inner.h264_retry.lock().expect("h264 retry is not poisoned") = Some(Instant::now());
-                callback
+                *callback
                     .inner
-                    .set_status(format!("H.264 encoder failed, sending JPEG instead: {error}"));
+                    .h264_retry
+                    .lock()
+                    .expect("h264 retry is not poisoned") = Some(Instant::now());
+                callback.inner.set_status(format!(
+                    "H.264 encoder failed, sending JPEG instead: {error}"
+                ));
                 return H264Outcome::Failed;
             }
         }
@@ -808,10 +883,14 @@ fn encode_h264(
         Err(error) => {
             *slot = None;
             drop(slot);
-            *callback.inner.h264_retry.lock().expect("h264 retry is not poisoned") = Some(Instant::now());
-            callback
+            *callback
                 .inner
-                .set_status(format!("H.264 encoder failed, sending JPEG instead: {error}"));
+                .h264_retry
+                .lock()
+                .expect("h264 retry is not poisoned") = Some(Instant::now());
+            callback.inner.set_status(format!(
+                "H.264 encoder failed, sending JPEG instead: {error}"
+            ));
             H264Outcome::Failed
         }
     }
@@ -868,7 +947,11 @@ fn copy_frame(callback: &CallbackState, buffer: *mut PwBuffer) -> Option<(u32, u
         return None;
     };
     let offset = chunk.offset as usize;
-    let available = if chunk.size == 0 { need } else { chunk.size as usize };
+    let available = if chunk.size == 0 {
+        need
+    } else {
+        chunk.size as usize
+    };
     if offset.saturating_add(available) < need && chunk.size != 0 {
         if !mapped.is_null() {
             unsafe { munmap(mapped, data.maxsize as usize) };
@@ -946,7 +1029,11 @@ fn format_pod() -> Vec<u8> {
         SPA_FORMAT_VIDEO_SIZE,
         &choice_range_rectangle(1920, 1080, 1, 1, 8192, 8192),
     );
-    push_prop(&mut props, 0x20004, &choice_range_fraction(30, 1, 0, 1, 240, 1));
+    push_prop(
+        &mut props,
+        0x20004,
+        &choice_range_fraction(30, 1, 0, 1, 240, 1),
+    );
     let mut pod = Vec::new();
     let body = 8 + props.len();
     pod.extend_from_slice(&(body as u32).to_ne_bytes());
@@ -1017,7 +1104,14 @@ fn choice_enum_id(ids: &[u32]) -> Vec<u8> {
     choice(SPA_CHOICE_ENUM, &children)
 }
 
-fn choice_range_rectangle(dw: u32, dh: u32, min_w: u32, min_h: u32, max_w: u32, max_h: u32) -> Vec<u8> {
+fn choice_range_rectangle(
+    dw: u32,
+    dh: u32,
+    min_w: u32,
+    min_h: u32,
+    max_w: u32,
+    max_h: u32,
+) -> Vec<u8> {
     let mut children = Vec::new();
     children.extend(pod_rectangle(dw, dh));
     children.extend(pod_rectangle(min_w, min_h));
@@ -1025,7 +1119,14 @@ fn choice_range_rectangle(dw: u32, dh: u32, min_w: u32, min_h: u32, max_w: u32, 
     choice(SPA_CHOICE_RANGE, &children)
 }
 
-fn choice_range_fraction(dn: u32, dd: u32, min_n: u32, min_d: u32, max_n: u32, max_d: u32) -> Vec<u8> {
+fn choice_range_fraction(
+    dn: u32,
+    dd: u32,
+    min_n: u32,
+    min_d: u32,
+    max_n: u32,
+    max_d: u32,
+) -> Vec<u8> {
     let mut children = Vec::new();
     children.extend(pod_fraction(dn, dd));
     children.extend(pod_fraction(min_n, min_d));

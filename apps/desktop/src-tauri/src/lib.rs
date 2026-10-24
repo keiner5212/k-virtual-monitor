@@ -203,7 +203,11 @@ fn paired_devices(state: State<'_, AppState>) -> Vec<DeviceInfo> {
             } else {
                 entry.height
             },
-            fps: if entry.fps == 0 { state.config.fps } else { entry.fps },
+            fps: if entry.fps == 0 {
+                state.config.fps
+            } else {
+                entry.fps
+            },
             jpeg_quality: if entry.jpeg_quality == 0 {
                 state.config.jpeg_quality
             } else {
@@ -241,7 +245,10 @@ struct DeviceSettings {
 /// Stores the stream settings of one phone and resizes its virtual screen
 /// when that phone is connected.
 #[tauri::command]
-fn save_device_settings(state: State<'_, AppState>, settings: DeviceSettings) -> Result<(), String> {
+fn save_device_settings(
+    state: State<'_, AppState>,
+    settings: DeviceSettings,
+) -> Result<(), String> {
     let mode = StreamMode {
         width: settings.width,
         height: settings.height,
@@ -319,7 +326,8 @@ pub fn default_source(config: &ServerConfig) -> Arc<dyn FrameSource> {
         codec: kvm_protocol::messages::codec::JPEG,
     }
     .normalize();
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var_os("KVM_SYNTHETIC").is_none() {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var_os("KVM_SYNTHETIC").is_none()
+    {
         Arc::new(VirtualSource::start(mode))
     } else {
         Arc::new(SyntheticSource::new(mode.width, mode.height, mode.quality))

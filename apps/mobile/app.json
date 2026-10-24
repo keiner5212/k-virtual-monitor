@@ -2,7 +2,7 @@
   "expo": {
     "name": "k-virtual-monitor",
     "slug": "k-virtual-monitor",
-    "version": "0.1.2",
+    "version": "0.1.3",
     "icon": "./assets/icon.png",
     "orientation": "landscape",
     "userInterfaceStyle": "dark",

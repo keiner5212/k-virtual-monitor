@@ -28,6 +28,10 @@ use crate::config::ServerConfig;
 use crate::devices::{hex, unhex, unix_now, DeviceEntry, DeviceStore, CAP_CONTROL, CAP_VIEW};
 use crate::now_stamp;
 use crate::source::{EncodedFrame, FrameSource, StreamMode};
+
+/// How long the reader of the pictures waits for one before it looks at the
+/// session again. It is short enough to notice that the session is over.
+const FRAME_WAIT: Duration = Duration::from_millis(200);
 /// What the live session is doing, for the user interface.
 #[derive(Debug, Clone, Default)]
 pub struct SessionInfo {
@@ -398,13 +402,22 @@ impl Server {
 
         let (frame_tx, mut frame_rx) = mpsc::channel::<EncodedFrame>(4);
         let source = self.source.clone();
-        tokio::task::spawn_blocking(move || {
-            while let Some(frame) = source.next_frame() {
-                if frame_tx.blocking_send(frame).is_err() {
-                    break;
+        // The pictures are read by a thread of its own, not by the runtime:
+        // the runtime waits for its own work when it stops, and a reader that
+        // waits for a picture that never comes would keep the process alive.
+        std::thread::Builder::new()
+            .name("kvm-frames".into())
+            .spawn(move || {
+                while !frame_tx.is_closed() {
+                    let Some(frame) = source.next_frame(FRAME_WAIT) else {
+                        continue;
+                    };
+                    if frame_tx.blocking_send(frame).is_err() {
+                        break;
+                    }
                 }
-            }
-        });
+            })
+            .ok();
 
         // The reader lives in its own task. A `select!` that reads from the
         // socket directly would cancel a half read message when the other

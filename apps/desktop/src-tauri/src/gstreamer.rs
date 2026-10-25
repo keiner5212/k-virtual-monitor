@@ -234,9 +234,10 @@ impl Encoder {
         encoder
     }
 
-    /// The next picture of the stream.
-    pub fn next_frame(&self) -> Option<EncodedFrame> {
-        self.slot.next_frame()
+    /// The next picture of the stream, or none when none arrives in the time
+    /// given.
+    pub fn next_frame(&self, wait: Duration) -> Option<EncodedFrame> {
+        self.slot.next_frame(wait)
     }
 
     /// True when the child died and no more pictures will come.

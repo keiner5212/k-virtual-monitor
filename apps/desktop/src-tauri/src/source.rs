@@ -50,8 +50,11 @@ impl StreamMode {
 
 /// Something that produces frames.
 pub trait FrameSource: Send + Sync {
-    /// Blocks until the next frame is ready. `None` ends the stream.
-    fn next_frame(&self) -> Option<EncodedFrame>;
+    /// The next frame, or `None` when none arrives in the time given.
+    ///
+    /// The reader of the frames asks for a picture with a limit, so it can
+    /// tell that the source is quiet without waiting forever.
+    fn next_frame(&self, wait: Duration) -> Option<EncodedFrame>;
 
     /// The codecs this source can produce, as a bit mask.
     fn codecs(&self) -> u16 {
@@ -108,8 +111,9 @@ impl FrameSlot {
         self.signal.notify_one();
     }
 
-    /// The next picture, waiting for one to arrive.
-    pub fn next_frame(&self) -> Option<EncodedFrame> {
+    /// The next picture, or `None` when none arrives in the time given.
+    pub fn next_frame(&self, wait: Duration) -> Option<EncodedFrame> {
+        let deadline = Instant::now() + wait;
         loop {
             let delivered = self.delivered.load(Ordering::Relaxed);
             let guard = self.frame.lock().expect("frame slot is not poisoned");
@@ -119,9 +123,13 @@ impl FrameSlot {
                     return Some(frame.clone());
                 }
             }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
             let (_guard, _) = self
                 .signal
-                .wait_timeout(guard, Duration::from_millis(100))
+                .wait_timeout(guard, left.min(Duration::from_millis(100)))
                 .expect("frame slot is not poisoned");
         }
     }
@@ -201,8 +209,8 @@ impl FrameSource for SyntheticSource {
         *slot = StreamMode { codec, ..incoming };
     }
 
-    fn next_frame(&self) -> Option<EncodedFrame> {
-        self.encoder.next_frame()
+    fn next_frame(&self, wait: Duration) -> Option<EncodedFrame> {
+        self.encoder.next_frame(wait)
     }
 
     fn stop(&self) {
@@ -228,7 +236,7 @@ mod tests {
             payload: Arc::new(vec![1, 2, 3]),
         };
         slot.publish(frame.clone());
-        let first = slot.next_frame().expect("a frame");
+        let first = slot.next_frame(Duration::from_secs(1)).expect("a frame");
         assert_eq!(first.payload.len(), 3);
         assert!(first.header.pts_ms < 1000);
     }

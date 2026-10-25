@@ -96,8 +96,8 @@ impl Drop for VirtualSource {
 }
 
 impl FrameSource for VirtualSource {
-    fn next_frame(&self) -> Option<EncodedFrame> {
-        self.inner.next_frame()
+    fn next_frame(&self, wait: Duration) -> Option<EncodedFrame> {
+        self.inner.next_frame(wait)
     }
 
     fn codecs(&self) -> u16 {
@@ -216,11 +216,11 @@ impl Inner {
         *self.status.lock().expect("status is not poisoned") = text.into();
     }
 
-    fn next_frame(&self) -> Option<EncodedFrame> {
+    fn next_frame(&self, wait: Duration) -> Option<EncodedFrame> {
         if self.stop.load(Ordering::Relaxed) {
             return None;
         }
-        self.slot.next_frame()
+        self.slot.next_frame(wait)
     }
 
     fn capture(self: &Arc<Self>) -> Result<(), String> {
@@ -728,7 +728,7 @@ mod tests {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
             let mut frames = Vec::new();
             while frames.len() < 8 && std::time::Instant::now() < deadline {
-                match reading.next_frame() {
+                match reading.next_frame(std::time::Duration::from_secs(1)) {
                     Some(frame) => frames.push(frame),
                     None => break,
                 }

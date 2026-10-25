@@ -13,6 +13,8 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.viewevent.EventDispatcher
 import expo.modules.kotlin.views.ExpoView
 import java.nio.ByteBuffer
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /** How long the decoder may wait for a free input buffer, in microseconds. */
 private const val INPUT_TIMEOUT_US = 3000L
@@ -65,7 +67,8 @@ class KvmVideoView(context: Context, appContext: AppContext) :
 
     private val onDecodeError by EventDispatcher<Map<String, String>>()
     private val texture = TextureView(context)
-    private val lock = Any()
+    private val lock = ReentrantLock()
+    private val signal = lock.newCondition()
     private val pending = ArrayDeque<Picture>()
     private var worker: Thread? = null
     private var running = false
@@ -92,7 +95,7 @@ class KvmVideoView(context: Context, appContext: AppContext) :
      */
     fun pushFrame(payload: ByteArray, keyframe: Boolean, width: Int, height: Int, ptsMs: Long) {
         val picture = Picture(payload, keyframe, width, height, ptsMs * 1000)
-        synchronized(lock) {
+        lock.withLock {
             pending.addLast(picture)
             // A picture that waits too long is worth less than the one that
             // replaced it, but the chain of the decoder breaks with it.
@@ -100,7 +103,7 @@ class KvmVideoView(context: Context, appContext: AppContext) :
                 pending.removeFirst()
                 broken = true
             }
-            lock.notifyAll()
+            signal.signalAll()
         }
     }
 
@@ -121,10 +124,10 @@ class KvmVideoView(context: Context, appContext: AppContext) :
 
     /** The next picture, or null when the decoder has to stop. */
     private fun nextPicture(): Picture? {
-        synchronized(lock) {
+        lock.withLock {
             while (running && pending.isEmpty()) {
                 try {
-                    lock.wait()
+                    signal.await()
                 } catch (_: InterruptedException) {
                     return null
                 }
@@ -137,7 +140,7 @@ class KvmVideoView(context: Context, appContext: AppContext) :
     }
 
     private fun decode(picture: Picture) {
-        synchronized(lock) {
+        lock.withLock {
             val target = surface
             if (target == null || !target.isValid) {
                 // Without a surface there is nothing to draw on, so the
@@ -168,20 +171,20 @@ class KvmVideoView(context: Context, appContext: AppContext) :
     }
 
     override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
-        synchronized(lock) {
+        lock.withLock {
             // The surface of the old decoder is gone, so it cannot be used.
             releaseCodec()
             broken = false
             surface?.release()
             surface = Surface(texture)
-            lock.notifyAll()
+            signal.signalAll()
         }
     }
 
     override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) = Unit
 
     override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
-        synchronized(lock) {
+        lock.withLock {
             releaseCodec()
             surface?.release()
             surface = null
@@ -192,9 +195,9 @@ class KvmVideoView(context: Context, appContext: AppContext) :
     override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
 
     override fun onDetachedFromWindow() {
-        synchronized(lock) {
+        lock.withLock {
             running = false
-            lock.notifyAll()
+            signal.signalAll()
         }
         worker?.join(1000)
         worker = null

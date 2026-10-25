@@ -13,6 +13,7 @@ section. The release draft uses that section as its body.
 - The decoder of the phone takes every picture, in the order they arrive. The state of the interface kept only the newest one and lost the pictures that arrived together, and a picture that depends on another one cannot be drawn when that other one was lost.
 - The decoder of the phone accepts the configuration of the codec. The parameter sets go to it without the start code, which many decoders refuse, and the pictures are decoded by a thread of their own instead of the thread of the interface.
 - The reason of a failure of the decoder reaches the screen, over the picture, and the decoder tries again with the next key frame.
+- The server stops when it is told to. The reader of the pictures waited for a picture that never came, so the headless server stayed alive after a signal, with its port and its encoder.
 
 ### Added
 

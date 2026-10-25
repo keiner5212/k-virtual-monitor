@@ -227,6 +227,35 @@ function optionsOf(pairing: string, port: number): ConnectOptions {
     };
 }
 
+/**
+ * Stops the server and waits for it, so the test does not leave it behind.
+ *
+ * The server has to end by itself, so the test waits for it before it kills
+ * it: a server that does not stop on the signal would stay with its encoder
+ * and its port.
+ */
+async function stopServer(child: ReturnType<typeof spawn>): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) {
+        // It is already gone.
+        return;
+    }
+    const exited = new Promise<void>((resolveExit) => {
+        child.once("exit", () => resolveExit());
+    });
+    child.kill("SIGTERM");
+    const stopped = await Promise.race([
+        exited.then(() => true),
+        sleep(3000).then(() => false),
+    ]);
+    if (!stopped) {
+        // The server has to end by itself: one that waits for a picture that
+        // never comes stays with its port and its encoder.
+        child.kill("SIGKILL");
+        await exited;
+        expect(stopped).toBe(true);
+    }
+}
+
 describe("the session of the phone", () => {
     itWithServer(
         "keeps the rate of the stream and gives the decoder what it needs",
@@ -246,11 +275,18 @@ describe("the session of the phone", () => {
 
                 // The first picture takes a moment: the screen is quiet.
                 expect(await waitUntil(() => frames.length > 0, 10000)).toBe(true);
-                const first = frames[0] as Frame;
                 expect(states).toContain("connected");
+
+                // The encoder is in the middle of a sequence when the phone
+                // arrives, so the first picture may be a delta picture. The
+                // decoder waits for the next key frame, which comes within a
+                // second.
+                expect(await waitUntil(() => frames.some((frame) => frame.keyframe), 5000)).toBe(
+                    true,
+                );
+                const first = frames.find((frame) => frame.keyframe) as Frame;
                 expect(first.width).toBe(WIDTH);
                 expect(first.height).toBe(HEIGHT);
-                expect(first.keyframe).toBe(true);
                 expect(hasDecoderConfig(first.data)).toBe(true);
 
                 // The rate of the stream, with a screen that does not change.
@@ -280,7 +316,7 @@ describe("the session of the phone", () => {
 
                 client.stop();
             } finally {
-                server.child.kill();
+                await stopServer(server.child);
                 rmSync(server.directory, { recursive: true, force: true });
             }
         },
@@ -307,7 +343,7 @@ describe("the session of the phone", () => {
                 expect(await waitUntil(() => connected >= 1, 10000)).toBe(true);
 
                 // The desktop goes away.
-                server.child.kill();
+                await stopServer(server.child);
                 await sleep(1500);
 
                 // And comes back.
@@ -316,11 +352,11 @@ describe("the session of the phone", () => {
                     await waitForPort(server.port, 10000);
                     expect(await waitUntil(() => connected >= 2, 15000)).toBe(true);
                 } finally {
-                    again.kill();
+                    await stopServer(again);
                 }
                 client.stop();
             } finally {
-                server.child.kill();
+                await stopServer(server.child);
                 rmSync(server.directory, { recursive: true, force: true });
             }
         },

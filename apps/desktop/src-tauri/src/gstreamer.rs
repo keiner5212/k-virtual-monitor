@@ -38,6 +38,7 @@ quality = max(1, min(100, int(sys.argv[5])))
 CODEC_H264 = 2
 
 quantizer = max(18, min(40, 51 - quality * 33 // 100))
+frame_bytes = width * height * 3 // 2
 capture_description = (
     f"{source} ! videoconvert ! videoscale method=0 ! "
     f"videorate drop-only=true ! "
@@ -45,7 +46,7 @@ capture_description = (
     f"appsink name=raw emit-signals=true max-buffers=1 drop=true sync=false"
 )
 encoder_description = (
-    f"appsrc name=src is-live=true format=time ! "
+    f"appsrc name=src format=time max-bytes={max(200000, frame_bytes * 2)} ! "
     f"video/x-raw,width={width},height={height},format=I420,framerate={fps}/1 ! "
     f"x264enc tune=zerolatency speed-preset=ultrafast key-int-max={fps} bframes=0 "
     f"byte-stream=true quantizer={quantizer} rc-lookahead=0 sync-lookahead=0 "
@@ -67,44 +68,56 @@ source_element.set_property(
     ),
 )
 
+# The picture of the screen and the moment the next picture is due. The due
+# time is absolute: the encoder sees the same distance between two pictures
+# every time, so the rate of the stream does not depend on how late the
+# timer woke up.
 lock = threading.Lock()
-state = {"picture": None, "pending": None, "pushed": 0.0}
+state = {"picture": None, "due": None}
+# The output has a lock of its own: a picture that waits for the reader of the
+# pipe must not stop the timer.
+out_lock = threading.Lock()
 out = sys.stdout.buffer
 interval = 1.0 / fps
+NANOSECOND = 1000000000
 
 
-def push(picture):
+def push(picture, due):
     frame = picture.copy()
-    frame.pts = int(Gst.util_get_timestamp())
+    frame.pts = int(due * NANOSECOND)
     frame.duration = int(Gst.SECOND / fps)
-    with lock:
-        state["pushed"] = time.monotonic()
-    source_element.emit("push-buffer", frame)
+    if source_element.emit("push-buffer", frame) != Gst.FlowReturn.OK:
+        print(
+            "gstreamer: the encoder did not take the picture",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def tick():
-    # The picture goes to the encoder when it is due. A picture that arrives
-    # between two ticks waits for the next one, so the encoder keeps the rate
-    # of the stream.
     now = time.monotonic()
     with lock:
-        picture = state["pending"] or state["picture"]
-        state["pending"] = None
-        due = now - state["pushed"] >= interval
-    if picture is not None and due:
-        push(picture)
+        picture = state["picture"]
+        due = state["due"]
+        if due is None:
+            due = now
+        elif now + interval * 0.5 < due:
+            # The next picture is not due yet.
+            return True
+        state["due"] = due + interval
+    if picture is None:
+        return True
+    push(picture, due)
+    # The timer stays only when the callback says so.
+    return True
 
 
 def on_picture(element):
     sample = element.emit("pull-sample")
     if sample is None:
         return Gst.FlowReturn.OK
-    picture = sample.get_buffer()
     with lock:
-        state["picture"] = picture
-        state["pending"] = picture
-    # A new picture goes to the encoder at once: the phone has to see it now.
-    tick()
+        state["picture"] = sample.get_buffer()
     return Gst.FlowReturn.OK
 
 
@@ -124,7 +137,7 @@ def on_frame(element):
     header = struct.pack(
         "<4sIBHHB", b"KVMF", len(data), key, width, height, CODEC_H264
     )
-    with lock:
+    with out_lock:
         out.write(header + data)
         out.flush()
     return Gst.FlowReturn.OK

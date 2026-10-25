@@ -163,12 +163,26 @@ impl SyntheticSource {
             .normalize(),
         ));
         let encoder = Encoder::start(
-            "videotestsrc pattern=smpte".to_string(),
+            pattern_description(),
             Arc::clone(&mode),
             Arc::new(FrameSlot::new()),
         );
         SyntheticSource { mode, encoder }
     }
+}
+
+/// The GStreamer description of the test pattern.
+///
+/// The compositor of a real screen only paints when something on it changes,
+/// so the quiet pattern drops most of its pictures. The encoder has to repeat
+/// the last one to keep the rate of the stream, and that is the case that
+/// breaks when the repetition does not work.
+fn pattern_description() -> String {
+    if std::env::var_os("KVM_SYNTHETIC_QUIET").is_some() {
+        return "videotestsrc pattern=smpte is-live=true ! identity drop-probability=0.9"
+            .to_string();
+    }
+    "videotestsrc pattern=smpte".to_string()
 }
 
 impl FrameSource for SyntheticSource {

@@ -125,6 +125,16 @@ is compressed with H.264, which is a sequence of access units in the Annex B
 format: each one starts with the start code `00 00 00 01` and carries the
 NAL units of the picture.
 
+Every key frame carries the parameter sets of the stream: the SPS (NAL 7) and
+the PPS (NAL 8) come first, so a decoder that joins the stream can start
+without waiting for the next one. The decoder of the phone takes them out of
+the access unit and hands them to the codec without the start code: the start
+code says where a NAL begins in the stream, not what the NAL holds.
+
+A picture that is not a key frame depends on the picture before it, so the
+client has to give the decoder every picture in the order they arrive. The
+decoder waits for the next key frame when one is lost.
+
 The codec is one byte, and the same numbering is used in the DISPLAY_INFO
 message and in the frame header:
 

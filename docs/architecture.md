@@ -10,7 +10,7 @@ phone (Expo, Android)          desktop (Tauri v2, Linux)
 │ SessionClient     │          │ server::Server             │
 │  @kvm/protocol    │◀────────▶│  kvm-protocol crate        │
 │                   │   TCP    │  device store (JSON)       │
-│ LatestFrame       │  28252   │  FrameSource               │
+│ FrameFeed         │  28252   │  FrameSource               │
 └───────────────────┘          │   └─ SyntheticSource (now)  │
                                │   └─ portal capture (next) │
                                └────────────────────────────┘
@@ -48,9 +48,11 @@ together: a change in one that is not mirrored in the other fails the tests.
 - The desktop owns the size of the stream. It picks a size and a frame rate
   for every phone, the phone only says what it can show, and the list of
   sizes is the same on both sides.
-- The client keeps only the newest frame. A late frame is worth less than
-  the one that replaced it, and a queue would turn a slow network into a
-  growing lag.
+- The interface shows the newest frame. A late frame is worth less than the
+  one that replaced it, and a queue would turn a slow network into a growing
+  lag. The decoder is the exception: it takes every frame, in the order they
+  arrive, because a frame that depends on another one cannot be drawn when
+  that other one was lost.
 - The client acknowledges frames on receipt, before decoding, so the decoder
   never becomes the bottleneck of the server.
 
@@ -91,6 +93,19 @@ The encoder gets the last picture again when the screen does not change, so
 the stream keeps the rate it was asked for. The pictures that repeat cost
 almost nothing in H.264, so the phone always has a picture and the link is
 quiet when the screen is quiet.
+
+The repetition happens in the child that encodes, before the encoder, and
+never after it: a picture that is already encoded cannot be sent twice,
+because the decoder of the phone would apply the second one twice. The child
+keeps an absolute schedule, so the distance between two pictures is the same
+every time and the rate of the stream does not depend on how late the timer
+woke up.
+
+The capture cannot raise the rate on its own. The portal sends a stream with
+a variable rate, and `videorate` without `drop-only` tries to catch up with
+it, which takes minutes when the screen was quiet for a while. The `drop-only`
+mode passes the pictures of the compositor as they are, and the child repeats
+the last one.
 
 ## Milestones
 

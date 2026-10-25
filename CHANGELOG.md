@@ -4,6 +4,20 @@ Each app version needs a section in this file. The version is the one in
 `apps/desktop/package.json`. CI rejects a bump that does not add the matching
 section. The release draft uses that section as its body.
 
+## [0.1.7] - 2026-10-25
+
+### Fixed
+
+- The stream keeps the rate it was asked for. The timer of the child that encodes the picture was taken away after its first call, so the repetition of the last picture only happened when the compositor painted a new one: the phone got one picture every few seconds on a quiet screen, and about half of the rate on a busy one.
+- The phone comes back when the desktop goes away. It gave up on the first failure and the greeting had no timeout, so a desktop that was not up yet looked like a server that cannot be found, and a connection that was never answered left the phone waiting forever.
+- The decoder of the phone takes every picture, in the order they arrive. The state of the interface kept only the newest one and lost the pictures that arrived together, and a picture that depends on another one cannot be drawn when that other one was lost.
+- The decoder of the phone accepts the configuration of the codec. The parameter sets go to it without the start code, which many decoders refuse, and the pictures are decoded by a thread of their own instead of the thread of the interface.
+- The reason of a failure of the decoder reaches the screen, over the picture, and the decoder tries again with the next key frame.
+
+### Added
+
+- The check of the session of the phone. It runs the client of the phone against the real server: it measures the rate of the stream with a screen that does not change, checks that every key frame carries the configuration the decoder needs, decodes the stream and checks that the phone comes back when the desktop goes away and comes back.
+
 ## [0.1.6] - 2026-10-24
 
 ### Changed

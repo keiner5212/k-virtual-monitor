@@ -10,7 +10,7 @@ import { decoderAvailable, KvmVideoView, type KvmVideoRef } from "kvm-decoder";
 import { clearPairing, loadPairing, savePairing, type StoredPairing } from "./src/lib/pairing";
 import { ensureCsprng } from "./src/lib/random";
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, type AppSettings } from "./src/lib/settings";
-import type { Frame } from "./src/lib/frames";
+import type { FrameFeed } from "./src/lib/frames";
 import { useSession } from "./src/lib/useSession";
 import HomeScreen from "./src/screens/HomeScreen";
 import PairScreen from "./src/screens/PairScreen";
@@ -106,7 +106,7 @@ function Monitor() {
 
     const [decodeFailure, setDecodeFailure] = useState<string | null>(null);
     const failDecoder = useCallback((message: string) => {
-        setDecodeFailure((current) => current ?? message);
+        setDecodeFailure(message);
     }, []);
 
     const unpair = useCallback(async () => {
@@ -154,8 +154,7 @@ function Monitor() {
     }
 
     const connected = session.state === "connected";
-    const down =
-        (session.state === "error" || session.state === "closed") && session.reconnectingIn === null;
+    const down = session.state === "error" || session.state === "closed";
     const leave = () => {
         setFullscreen(false);
         setRoute("home");
@@ -188,23 +187,8 @@ function Monitor() {
 
             {tab === "screen" ? (
                 <View style={styles.stage}>
-                    {decodeFailure ? (
-                        <View style={styles.stateBlock}>
-                            <Text style={type.title}>The picture cannot be shown</Text>
-                            <Text style={[type.body, styles.stateDetail]}>{decodeFailure}</Text>
-                            <Pressable
-                                accessibilityRole="button"
-                                style={styles.action}
-                                onPress={() => {
-                                    setDecodeFailure(null);
-                                    setReloadToken((token) => token + 1);
-                                }}
-                            >
-                                <Text style={styles.actionLabel}>Try again</Text>
-                            </Pressable>
-                        </View>
-                    ) : connected && session.frame ? (
-                        <Picture frame={session.frame} onDecodeError={failDecoder} />
+                    {connected && session.frames && session.hasFrame ? (
+                        <Picture frames={session.frames} onDecodeError={failDecoder} />
                     ) : down ? (
                         <View style={styles.stateBlock}>
                             <Text style={type.title}>Open the app on the PC</Text>
@@ -237,6 +221,20 @@ function Monitor() {
                         </View>
                     )}
 
+                    {decodeFailure ? (
+                        <View style={styles.warning} accessibilityLiveRegion="polite">
+                            <Text style={styles.warningTitle}>The picture cannot be shown</Text>
+                            <Text style={styles.warningText}>{decodeFailure}</Text>
+                            <Pressable
+                                accessibilityRole="button"
+                                style={styles.warningAction}
+                                onPress={() => setDecodeFailure(null)}
+                            >
+                                <Text style={styles.warningActionLabel}>Dismiss</Text>
+                            </Pressable>
+                        </View>
+                    ) : null}
+
                     {settings.showStats && session.info && !fullscreen ? (
                         <View style={styles.overlay}>
                             <Text
@@ -250,7 +248,7 @@ function Monitor() {
                         </View>
                     ) : null}
 
-                    {fullscreen || down || !session.frame ? null : (
+                    {fullscreen || down || !session.hasFrame ? null : (
                         <Pressable
                             accessibilityRole="button"
                             accessibilityLabel="Full screen"
@@ -315,37 +313,47 @@ function TabButton({
 
 const H264_WIRE = codecWireValue(Codec.H264);
 
-function Picture({ frame, onDecodeError }: { frame: Frame; onDecodeError: (message: string) => void }) {
+function Picture({
+    frames,
+    onDecodeError,
+}: {
+    frames: FrameFeed;
+    onDecodeError: (message: string) => void;
+}) {
     const video = useRef<KvmVideoRef>(null);
-    const h264 = frame.codec === H264_WIRE;
 
     useEffect(() => {
-        if (!h264) {
-            return;
-        }
         if (!decoderAvailable()) {
             onDecodeError("This build of the app has no H.264 decoder.");
             return;
         }
-        const view = video.current;
-        if (!view) {
-            return;
-        }
-        void view.pushFrame(frame.data, frame.keyframe, frame.width, frame.height).catch(() => {
-            onDecodeError("The decoder of the phone refused the picture.");
+        // The decoder takes every picture, in the order they come in: a
+        // picture that depends on another one cannot be drawn when that other
+        // one was lost, so the state of the interface cannot hold them.
+        return frames.subscribe((frame) => {
+            const view = video.current;
+            if (!view || frame.codec !== H264_WIRE) {
+                return;
+            }
+            void view
+                .pushFrame(frame.data, frame.keyframe, frame.width, frame.height, frame.ptsMs)
+                .catch(() => {
+                    onDecodeError("The decoder of the phone refused the picture.");
+                });
         });
-    }, [frame, h264, onDecodeError]);
+    }, [frames, onDecodeError]);
 
-    if (h264 && decoderAvailable()) {
-        return (
-            <KvmVideoView
-                ref={video}
-                style={styles.picture}
-                onDecodeError={() => onDecodeError("The decoder of the phone refused the picture.")}
-            />
-        );
-    }
-    return null;
+    return (
+        <KvmVideoView
+            ref={video}
+            style={styles.picture}
+            onDecodeError={(event) =>
+                onDecodeError(
+                    event.nativeEvent?.message ?? "The decoder of the phone refused the picture.",
+                )
+            }
+        />
+    );
 }
 
 /** The codec of the live session, from the wire value the server sent. */
@@ -497,6 +505,41 @@ const styles = StyleSheet.create({
     fullLabel: {
         color: colors.ink,
         fontSize: 13,
+        fontWeight: "600",
+    },
+    warning: {
+        position: "absolute",
+        left: space[3],
+        right: space[3],
+        bottom: space[3],
+        gap: space[2],
+        padding: space[4],
+        borderRadius: radius.panel,
+        borderWidth: 1,
+        borderColor: colors.danger,
+        backgroundColor: "rgba(11,13,18,0.94)",
+    },
+    warningTitle: {
+        fontSize: 15,
+        lineHeight: 20,
+        fontWeight: "600",
+        color: colors.ink,
+    },
+    warningText: {
+        fontSize: 13,
+        lineHeight: 18,
+        color: colors.muted,
+    },
+    warningAction: {
+        alignSelf: "flex-start",
+        paddingVertical: space[2],
+        paddingHorizontal: space[4],
+        borderRadius: radius.control,
+        backgroundColor: colors.accent,
+    },
+    warningActionLabel: {
+        color: colors.surface,
+        fontSize: 14,
         fontWeight: "600",
     },
     scroll: {

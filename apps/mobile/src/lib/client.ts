@@ -4,9 +4,10 @@
  * It opens a TCP connection, completes the pairing handshake and then keeps
  * the frame window fed: it acknowledges every frame on receipt, before
  * decoding, so the server is never blocked by the decoder.
+ *
+ * The transport is injected, so the same client runs on the phone and in the
+ * tests of the repository.
  */
-
-import TcpSocket from "react-native-tcp-socket";
 
 import {
     clientHandshake,
@@ -24,7 +25,7 @@ import {
     type Message,
 } from "@kvm/protocol";
 
-import { LatestFrame, type Frame } from "./frames";
+import { FrameFeed, type Frame } from "./frames";
 
 /** The biggest payload the phone accepts, the same limit the server uses. */
 const MAX_PAYLOAD = 4 * 1024 * 1024;
@@ -32,11 +33,14 @@ const MAX_PAYLOAD = 4 * 1024 * 1024;
 /** How often the phone says hello, so the desktop does not close the session. */
 const HEARTBEAT_MS = 30000;
 
+/** How long the greeting may take before the attempt counts as a failure. */
+const HANDSHAKE_TIMEOUT_MS = 8000;
+
 /** How fast the phone comes back when the desktop goes away. */
 const RECONNECT_DELAY_MS = 1000;
 
 /** The longest wait between two attempts. */
-const RECONNECT_MAX_DELAY_MS = 10000;
+const RECONNECT_MAX_DELAY_MS = 2000;
 
 /** Bytes of the frame header that precede the picture. */
 const FRAME_HEADER_LEN = 14;
@@ -47,6 +51,19 @@ export interface ClientEvents {
     onState: (state: ConnectionState, detail?: string) => void;
     onDisplayInfo: (info: DisplayInfo) => void;
 }
+
+/** The socket the session needs. */
+export interface Transport {
+    write(data: Uint8Array): void;
+    onData(listener: (data: Uint8Array) => void): void;
+    onError(listener: (error: Error) => void): void;
+    onClose(listener: () => void): void;
+    setNoDelay(noDelay: boolean): void;
+    destroy(): void;
+}
+
+/** Opens the socket to the desktop. */
+export type TransportFactory = (options: ConnectOptions) => Promise<Transport>;
 
 export interface ConnectOptions {
     host: string;
@@ -59,13 +76,15 @@ export interface ConnectOptions {
     maxWidth: number;
     maxHeight: number;
     maxFps: number;
+    /** Opens the socket. The phone has one and the tests have another. */
+    transport: TransportFactory;
 }
 
 export class SessionClient {
-    private socket: TcpSocket.Socket | null = null;
+    private socket: Transport | null = null;
     private channel: MessageChannel | null = null;
     private session: Session | null = null;
-    private readonly frames: LatestFrame;
+    private readonly frames: FrameFeed;
     private ackedBytes = 0;
     private highestSeq = 0;
     private closing = false;
@@ -75,75 +94,50 @@ export class SessionClient {
 
     constructor(
         private readonly events: ClientEvents,
-        frames: LatestFrame = new LatestFrame(),
+        frames: FrameFeed = new FrameFeed(),
     ) {
         this.frames = frames;
     }
 
-    get latestFrame(): LatestFrame {
+    get latestFrame(): FrameFeed {
         return this.frames;
     }
 
     async connect(options: ConnectOptions): Promise<void> {
         this.events.onState("connecting");
-        const socket = await new Promise<TcpSocket.Socket>((resolve, reject) => {
-            const created = TcpSocket.createConnection(
-                {
-                    host: options.host,
-                    port: options.port,
-                    connectTimeout: 5000,
-                },
-                () => resolve(created),
-            );
-            created.on("error", reject);
-        });
-        socket.setNoDelay(true);
+        const socket = await options.transport(options);
         this.socket = socket;
+        try {
+            socket.setNoDelay(true);
+            const channel = new MessageChannel(adapterOf(socket), MAX_PAYLOAD);
+            this.channel = channel;
 
-        const adapter: ChannelSocket = {
-            write: (data) => {
-                socket.write(data);
-            },
-            on: (event, listener) => {
-                if (event === "data") {
-                    socket.on("data", (data) => {
-                        listener(data instanceof Uint8Array ? data : new Uint8Array(0));
-                    });
-                } else if (event === "error") {
-                    socket.on("error", (error) => listener(error));
-                } else {
-                    socket.on("close", () => listener());
-                }
-            },
-        };
-        const channel = new MessageChannel(adapter, MAX_PAYLOAD);
-        this.channel = channel;
+            const hello: Hello = {
+                clientNonce: randomBytes(32),
+                deviceId: options.deviceId,
+                deviceName: options.deviceName ?? "phone",
+                maxWidth: options.maxWidth,
+                maxHeight: options.maxHeight,
+                maxFps: options.maxFps,
+                codecMask: options.codecMask,
+                capsRequested: options.caps,
+            };
 
-        socket.on("error", (error) => {
-            this.events.onState("error", error.message);
-        });
-        socket.on("close", () => {
-            if (!this.closing) {
-                this.events.onState("closed");
-            }
-        });
-
-        const hello: Hello = {
-            clientNonce: randomBytes(32),
-            deviceId: options.deviceId,
-            deviceName: options.deviceName ?? "phone",
-            maxWidth: options.maxWidth,
-            maxHeight: options.maxHeight,
-            maxFps: options.maxFps,
-            codecMask: options.codecMask,
-            capsRequested: options.caps,
-        };
-
-        const keys = await clientHandshake(channel, options.psk, hello);
-        this.session = new Session(keys, "client");
-        this.events.onState("connected");
-        this.startHeartbeat();
-        void this.pump();
+            // The greeting must not hang: a desktop that accepts the connection
+            // and then says nothing would leave the phone waiting forever.
+            const keys = await within(
+                clientHandshake(channel, options.psk, hello),
+                HANDSHAKE_TIMEOUT_MS,
+                "the desktop did not answer the greeting",
+            );
+            this.session = new Session(keys, "client");
+            this.events.onState("connected");
+            this.startHeartbeat();
+            void this.pump();
+        } catch (cause) {
+            this.closeSocket();
+            throw cause;
+        }
     }
 
     /** The round trip time of the last heartbeat, in milliseconds. */
@@ -242,35 +236,41 @@ export class SessionClient {
             clearInterval(this.heartbeatTimer);
             this.heartbeatTimer = null;
         }
-        this.socket?.destroy();
-        this.socket = null;
+        this.closeSocket();
         this.channel = null;
         this.session = null;
         this.events.onState("idle");
     }
+
+    private closeSocket(): void {
+        const socket = this.socket;
+        this.socket = null;
+        socket?.destroy();
+    }
 }
 
 /**
- * Brings a live session back after the desktop drops.
+ * Brings the session back after the desktop drops.
  *
- * A desktop that never answers is not retried. The screen tells the user to
- * open the PC app instead of looping on the error.
+ * The phone keeps trying: the desktop may be restarting, the network may be
+ * busy for a moment, and the user should not have to touch anything. The wait
+ * between two attempts grows a little and then stays short.
  */
 export class ReconnectingClient {
     private client: SessionClient | null = null;
     private timer: ReturnType<typeof setTimeout> | null = null;
     private attempt = 0;
     private stopped = false;
-    /** True after one successful handshake. Failures before that do not retry. */
-    private live = false;
-    private readonly frameBuffer = new LatestFrame();
+    /** The attempt that is running. An older one is ignored when it reports. */
+    private generation = 0;
+    private readonly frameBuffer = new FrameFeed();
 
     constructor(
         private readonly options: ConnectOptions,
         private readonly events: ClientEvents & { onReconnectIn: (seconds: number | null) => void },
     ) { }
 
-    get frames(): LatestFrame {
+    get frames(): FrameFeed {
         return this.frameBuffer;
     }
 
@@ -285,6 +285,7 @@ export class ReconnectingClient {
             clearTimeout(this.timer);
             this.timer = null;
         }
+        this.generation += 1;
         this.client?.close();
         this.client = null;
         this.events.onReconnectIn(null);
@@ -294,10 +295,14 @@ export class ReconnectingClient {
         if (this.stopped) {
             return;
         }
+        const generation = ++this.generation;
         const client = new SessionClient(
             {
-                onState: (state, detail) => this.note(state, detail),
+                onState: (state, detail) => this.note(generation, state, detail),
                 onDisplayInfo: (info) => {
+                    if (generation !== this.generation) {
+                        return;
+                    }
                     this.attempt = 0;
                     this.events.onDisplayInfo(info);
                 },
@@ -308,18 +313,17 @@ export class ReconnectingClient {
         try {
             await client.connect(this.options);
         } catch (cause) {
-            if (!this.stopped) {
-                this.note("error", cause instanceof Error ? cause.message : String(cause));
+            if (!this.stopped && generation === this.generation) {
+                this.note(generation, "error", cause instanceof Error ? cause.message : String(cause));
             }
         }
     }
 
-    private note(state: ConnectionState, detail?: string): void {
-        if (this.stopped) {
+    private note(generation: number, state: ConnectionState, detail?: string): void {
+        if (this.stopped || generation !== this.generation) {
             return;
         }
         if (state === "connected") {
-            this.live = true;
             this.attempt = 0;
         }
         this.events.onState(state, detail);
@@ -328,13 +332,9 @@ export class ReconnectingClient {
         }
     }
 
-    /** A desktop that was never reached stays down. A live session may come back. */
+    /** The desktop may be gone for a while. The phone keeps trying. */
     private afterDrop(): void {
         if (this.stopped || this.timer) {
-            return;
-        }
-        if (!this.live || this.attempt >= 4) {
-            this.events.onReconnectIn(null);
             return;
         }
         this.scheduleRetry();
@@ -349,7 +349,7 @@ export class ReconnectingClient {
             RECONNECT_MAX_DELAY_MS,
         );
         this.attempt += 1;
-        this.events.onReconnectIn(Math.round(delay / 1000));
+        this.events.onReconnectIn(Math.max(1, Math.round(delay / 1000)));
         this.timer = setTimeout(() => {
             this.timer = null;
             this.events.onReconnectIn(null);
@@ -357,4 +357,41 @@ export class ReconnectingClient {
             void this.attemptConnect();
         }, delay);
     }
+}
+
+/** The view of the protocol over a socket. */
+function adapterOf(socket: Transport): ChannelSocket {
+    return {
+        write: (data) => {
+            socket.write(data);
+        },
+        on: (event, listener) => {
+            if (event === "data") {
+                socket.onData((data) => listener(data));
+            } else if (event === "error") {
+                socket.onError((error) => listener(error));
+            } else {
+                socket.onClose(() => listener());
+            }
+        },
+    };
+}
+
+/**
+ * Fails when the work takes longer than the time given.
+ */
+function within<T>(work: Promise<T>, ms: number, message: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(message)), ms);
+        work.then(
+            (value) => {
+                clearTimeout(timer);
+                resolve(value);
+            },
+            (error) => {
+                clearTimeout(timer);
+                reject(error);
+            },
+        );
+    });
 }

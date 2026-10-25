@@ -11,9 +11,9 @@ import { Dimensions, PixelRatio, Platform } from "react-native";
 import type { DisplayInfo } from "@kvm/protocol";
 
 import { ReconnectingClient, type ConnectionState } from "./client";
-import type { Frame } from "./frames";
 import type { StoredPairing } from "./pairing";
 import { codecMask } from "./settings";
+import { phoneTransport } from "./transport";
 
 interface UseSessionOptions {
     pairing: StoredPairing | null;
@@ -30,7 +30,7 @@ export function useSession({ pairing, active, openId, reloadToken, onDisplayInfo
     const [state, setState] = useState<ConnectionState>("idle");
     const [detail, setDetail] = useState<string | null>(null);
     const [info, setInfo] = useState<DisplayInfo | null>(null);
-    const [frame, setFrame] = useState<Frame | null>(null);
+    const [hasFrame, setHasFrame] = useState(false);
     const [reconnectingIn, setReconnectingIn] = useState<number | null>(null);
     const [trackedOpen, setTrackedOpen] = useState(openId);
     if (trackedOpen !== openId) {
@@ -38,7 +38,7 @@ export function useSession({ pairing, active, openId, reloadToken, onDisplayInfo
         setState("connecting");
         setDetail(null);
         setInfo(null);
-        setFrame(null);
+        setHasFrame(false);
         setReconnectingIn(null);
     }
 
@@ -66,6 +66,7 @@ export function useSession({ pairing, active, openId, reloadToken, onDisplayInfo
                 maxWidth: capability().width,
                 maxHeight: capability().height,
                 maxFps: 60,
+                transport: phoneTransport,
             },
             {
                 onState: (next, message) => {
@@ -100,10 +101,13 @@ export function useSession({ pairing, active, openId, reloadToken, onDisplayInfo
         if (!client) {
             return;
         }
-        return client.frames.subscribe(setFrame);
+        // The pictures are not kept in the state of the interface: the
+        // decoder takes every one of them, and the state would lose the
+        // ones that arrive together.
+        return client.frames.subscribe(() => setHasFrame(true));
     }, [client]);
 
-    return { state, detail, info, frame, reconnectingIn };
+    return { state, detail, info, frames: client?.frames ?? null, hasFrame, reconnectingIn };
 }
 
 /** The name of the phone, so the desktop can tell the devices apart. */

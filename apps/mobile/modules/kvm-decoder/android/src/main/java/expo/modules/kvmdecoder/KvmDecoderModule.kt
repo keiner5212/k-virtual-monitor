@@ -254,7 +254,12 @@ class KvmVideoView(context: Context, appContext: AppContext) :
 
     private fun queueToCodec(picture: Picture) {
         val decoder = codec ?: return
-        val index = decoder.dequeueInputBuffer(INPUT_TIMEOUT_US)
+        val index = try {
+            decoder.dequeueInputBuffer(INPUT_TIMEOUT_US)
+        } catch (error: MediaCodec.CodecException) {
+            failed(error)
+            return
+        }
         if (index < 0) {
             // The decoder is busy. This picture is late, so it is dropped and
             // the chain breaks.
@@ -285,7 +290,12 @@ class KvmVideoView(context: Context, appContext: AppContext) :
         val deadline = System.nanoTime() + DRAIN_BUDGET_NS
         while (true) {
             val timeout = if (System.nanoTime() < deadline) DRAIN_TIMEOUT_US else 0L
-            val output = decoder.dequeueOutputBuffer(info, timeout)
+            val output = try {
+                decoder.dequeueOutputBuffer(info, timeout)
+            } catch (error: MediaCodec.CodecException) {
+                failed(error)
+                return
+            }
             if (output < 0) {
                 return
             }
@@ -293,14 +303,20 @@ class KvmVideoView(context: Context, appContext: AppContext) :
                 decoder.releaseOutputBuffer(output, false)
                 continue
             }
-            if ((info.flags and MediaCodec.BUFFER_FLAG_ERROR) != 0) {
-                decoder.releaseOutputBuffer(output, false)
-                broken = true
-                report("the decoder of the phone failed on a picture")
-                continue
-            }
             decoder.releaseOutputBuffer(output, true)
         }
+    }
+
+    /**
+     * The decoder failed.
+     *
+     * The codec is broken from now on, so it goes away and the next key
+     * frame starts a new one.
+     */
+    private fun failed(error: MediaCodec.CodecException) {
+        broken = true
+        releaseCodec()
+        report("the decoder of the phone failed: ${error.diagnosticInfo}")
     }
 
     private fun releaseCodec() {

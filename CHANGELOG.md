@@ -15,6 +15,7 @@ section. The release draft uses that section as its body.
 - The reason of a failure of the decoder reaches the screen, over the picture, and the decoder tries again with the next key frame.
 - The server stops when it is told to. The reader of the pictures waited for a picture that never came, so the headless server stayed alive after a signal, with its port and its encoder.
 - The decoder of the phone builds again. The lock of the decoder was a plain object and the wait of the thread used methods that Kotlin does not have, so the app did not compile.
+- The failure of the decoder of the phone is seen as it is. There is no flag for a failed picture in the decoder of Android: the failure comes as an exception, and now the decoder takes it, throws the codec away and starts again with the next key frame.
 
 ### Added
 

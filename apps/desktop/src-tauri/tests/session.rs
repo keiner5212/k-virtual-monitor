@@ -27,8 +27,19 @@ struct Fixture {
     dir: std::path::PathBuf,
 }
 
+/// A number that tells the tests apart.
+///
+/// The tests run at the same time and every one of them saves the store of
+/// the device it pairs. They need a store of their own, or the phone of one
+/// test replaces the phone of another and the greeting is refused.
+static NEXT_FIXTURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 async fn start() -> Fixture {
-    let dir = kvm_desktop_lib::scratch_dir().join(format!("kvm-session-{}", std::process::id()));
+    let dir = kvm_desktop_lib::scratch_dir().join(format!(
+        "kvm-session-{}-{}",
+        std::process::id(),
+        NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let store_path = dir.join("devices.json");
 
     let psk = Psk::generate();
